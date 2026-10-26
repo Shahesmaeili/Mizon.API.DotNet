@@ -10,7 +10,6 @@ public class BaseApiError
     /// </summary>
     public int Code { get; set; }
 
-
     /// <summary>
     /// A human-readable Title describing the error.
     /// </summary>
@@ -21,5 +20,8 @@ public class BaseApiError
     /// </summary>
     public string Details { get; set; } = null!;
 
+    /// <summary>
+    /// Optional text for a close button.
+    /// </summary>
     public string? CloseButtonText { get; set; }
 }

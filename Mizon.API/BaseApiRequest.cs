@@ -14,5 +14,5 @@ public class BaseApiRequest<TApiRequest> : IBaseApiRequest
     /// The content of the API request.
     /// This property holds the specific data for the API request.
     /// </summary>
-    public TApiRequest? RequestContent { get; set; }
+    public TApiRequest? Content { get; set; }
 }

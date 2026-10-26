@@ -1,5 +1,4 @@
-﻿using Microsoft.AspNetCore.SignalR.Client;
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.DependencyInjection;
 using System.Net;
 
 namespace Mizon.API.Client;
@@ -10,19 +9,33 @@ public static class MizonApiServiceCollectionExtensions
     {
         services.AddMemoryCache();
         services.AddHttpClient<MizonApi>(client => { })
-             .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+             .ConfigurePrimaryHttpMessageHandler(() =>
              {
-                 AutomaticDecompression = DecompressionMethods.All
+                 var handler = new SocketsHttpHandler
+                 {
+                     AutomaticDecompression = DecompressionMethods.All,
+                     EnableMultipleHttp2Connections = true,
+                 };
+
+
+                 return handler;
              });
 
-        var hubConnection = new HubConnectionBuilder()
-            .WithUrl(Endpoints.BASE_HUB_URL)
-            .WithAutomaticReconnect()
-            .Build();
 
-        services.AddSingleton(hubConnection);
 
         services.AddSingleton<MizonApi>();
+
+
+
+        // Register MizonSocket as singleton. It will use MizonApi to read the current token.
+        services.AddSingleton(sp =>
+        {
+            var api = sp.GetRequiredService<MizonApi>();
+            return new MizonSocket(api, Endpoints.MIZON_HUB_URL);
+        });
+
+
+
         return services;
     }
 }

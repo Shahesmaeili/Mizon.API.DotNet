@@ -1,48 +1,42 @@
-﻿using Microsoft.AspNetCore.SignalR.Client;
-using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.Extensions.Caching.Memory;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 namespace Mizon.API;
 
 
-public interface IMizonApiResponseMiddleware
-{
-    Task InvokeAsync(IBaseApiRequest request, IBaseApiResponse response);
-}
-
-public class MizonApi
+public sealed class MizonApi
 {
 
-    private readonly List<IMizonApiResponseMiddleware> _responseMiddlewares = new();
-    private readonly IServiceProvider _serviceProvider;
-    private readonly HubConnection _hubConnection;
 
     private readonly HttpClient _httpClient;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
         WriteIndented = true
     };
 
     private readonly IMemoryCache _memoryCache;
     private string? _token;
+    private Version? _osVersion;
+    private string? _deviceIdentifier;
+    private string? _deviceModel;
+    private string? _deviceName;
+    private string? _deviceUsername;
+    private Guid? _platformVersion;
 
     public MizonApi(HttpClient httpClient,
-        IMemoryCache memoryCache,
-        IServiceProvider serviceProvider,
-        HubConnection hubConnection)
+        IMemoryCache memoryCache)
     {
         _httpClient = httpClient;
         _memoryCache = memoryCache;
-        _serviceProvider = serviceProvider;
-        _hubConnection = hubConnection;
     }
 
     public void SetToken(string token)
@@ -53,23 +47,58 @@ public class MizonApi
         _token = token;
     }
 
+    public void SetDeviceInformation(Version OsVersion, string deviceIdentifier, string deviceModel, string deviceName, string deviceUsername, Guid platformVersion)
+    {
+        _osVersion = OsVersion;
+        _deviceIdentifier = deviceIdentifier;
+        _deviceModel = deviceModel;
+        _deviceName = deviceName;
+        _deviceUsername = deviceUsername;
+        _platformVersion = platformVersion;
+
+    }
+
     public string? GetToken() => _token;
 
-
-    public void UseResponseMiddleware<T>() where T : class, IMizonApiResponseMiddleware
+    public async IAsyncEnumerable<Response> SendStreamRequestAsync<Request, Response>(
+        MizonApiStreamRequest<Request, Response> mizonApiRequest,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        where Request : IApiRequest
+        where Response : IApiResponse
     {
-        var instance = _serviceProvider.GetService(typeof(T)) as IMizonApiResponseMiddleware
-                       ?? throw new InvalidOperationException($"Unable to resolve response middleware '{typeof(T).Name}' from DI container.");
-        _responseMiddlewares.Add(instance);
+        using var httpRequestMessage = new HttpRequestMessage();
+        ManageHttpVersion(httpRequestMessage);
+        ManageAuthorization(httpRequestMessage, mizonApiRequest.NeedAuthorized, _token);
+        ManageInformationHeaders(httpRequestMessage, _osVersion, _deviceIdentifier, _deviceModel, _deviceName, _deviceUsername, _platformVersion);
+
+        if (mizonApiRequest.HttpMethod != HttpMethod.GET)
+            throw new NotSupportedException("Only GET is supported for streamed API requests.");
+
+        httpRequestMessage.RequestUri = new Uri($"{mizonApiRequest.Endpoint}{BuildQueryString(mizonApiRequest.BaseApiRequest.Content)}");
+        httpRequestMessage.Method = System.Net.Http.HttpMethod.Get;
+
+        using var timeoutCts = new CancellationTokenSource(mizonApiRequest.CallTimeoutDuration);
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
+        using var response = await _httpClient.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead, linkedCts.Token).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        await using var responseStream = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false);
+        using var reader = new StreamReader(responseStream, Encoding.UTF8, leaveOpen: false);
+
+        while (await reader.ReadLineAsync(linkedCts.Token).ConfigureAwait(false) is { Length: > 0 } line)
+        {
+            var item = JsonSerializer.Deserialize<Response>(line, JsonOptions);
+            if (item is not null)
+                yield return item;
+        }
     }
 
 
 
-
-    public async Task<BaseApiResponse<Response>> SendRequestAsync<Request, Response>(MizonApiRequest<Request, Response> mizonApiRequest, CancellationToken? cancellationToken = null)
+    public async ValueTask<BaseApiResponse<Response>> SendRequestAsync<Request, Response>(MizonApiRequest<Request, Response> mizonApiRequest, CancellationToken? cancellationToken = null)
         where Request : IApiRequest where Response : IApiResponse
     {
-        var baseApiResponse = new BaseApiResponse<Response>(_hubConnection);
+        var baseApiResponse = new BaseApiResponse<Response>();
 
         try
         {
@@ -89,12 +118,14 @@ public class MizonApi
 
             ManageAuthorization(httpRequestMessage, mizonApiRequest.NeedAuthorized, _token);
 
+            ManageInformationHeaders(httpRequestMessage, _osVersion, _deviceIdentifier, _deviceModel, _deviceName, _deviceUsername, _platformVersion);
 
 
             if (mizonApiRequest.HttpMethod == HttpMethod.GET)
             {
-                //var queryString = GetQueryStringFromObject(mizonApiRequest.BaseApiRequest);
-                httpRequestMessage.RequestUri = new($"{mizonApiRequest.Endpoint}");
+                var query = BuildQueryString(mizonApiRequest.BaseApiRequest.Content);
+
+                httpRequestMessage.RequestUri = new($"{mizonApiRequest.Endpoint}{query}");
                 httpRequestMessage.Method = System.Net.Http.HttpMethod.Get;
             }
             else if (mizonApiRequest.HttpMethod == HttpMethod.POST)
@@ -111,17 +142,25 @@ public class MizonApi
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken ?? CancellationToken.None);
 
             var httpResponseMessage = await _httpClient.SendAsync(httpRequestMessage, linkedCts.Token);
+
+            if (httpResponseMessage.StatusCode is HttpStatusCode.Unauthorized)
+            {
+                baseApiResponse.Error = new BaseApiError
+                {
+                    Code = 401,
+                    Title = "Unauthorized",
+                };
+
+                return baseApiResponse;
+            }
+
             var responseJson = await httpResponseMessage.Content.ReadAsStringAsync();
+
             var response = JsonSerializer.Deserialize<BaseApiResponse<Response>>(responseJson, JsonOptions);
 
             ManageToken(mizonApiRequest.PropertyForToken, response);
             ManageSetCache(cacheKey, response, mizonApiRequest.ClientCacheStrategy, mizonApiRequest.MaximumClientCacheDuration);
 
-            // Run response middleware
-            foreach (var middleware in _responseMiddlewares)
-            {
-                await middleware.InvokeAsync(mizonApiRequest.BaseApiRequest, response);
-            }
 
             return response!;
         }
@@ -158,7 +197,7 @@ public class MizonApi
             {
                 Code = 104,
                 Title = "Timeout",
-                Details = "The request operation timed out. " + ex.Message
+                Details = "The request operation timed out.. " + ex.Message
             };
         }
         catch (OperationCanceledException ex) when (ex.CancellationToken == cancellationToken)
@@ -167,7 +206,7 @@ public class MizonApi
             {
                 Code = 105,
                 Title = "Cancelled by User",
-                Details = "The request was cancelled by the caller. " + ex.Message
+                Details = "The request was cancelled by the caller.. " + ex.Message
             };
         }
         catch (TaskCanceledException ex) when (ex.CancellationToken != cancellationToken)
@@ -204,9 +243,17 @@ public class MizonApi
     // تابع برای تولید کلید منحصر به فرد برای کش
     private string ManageCacheKey(object data, string endpoint, HttpMethod httpMethod)
     {
-        var requestHash = JsonSerializer.Serialize(data).GetHashCode();
-        return $"{endpoint}_{httpMethod}_{requestHash}";
+        var json = JsonSerializer.Serialize(data);
+        return ComputeHash($"{endpoint}_{httpMethod}_{json}");
     }
+
+    private string ComputeHash(string input)
+    {
+        Span<byte> buffer = stackalloc byte[32]; // SHA256 = 32 bytes
+        SHA256.HashData(Encoding.UTF8.GetBytes(input), buffer);
+        return Convert.ToHexString(buffer);
+    }
+
 
     // تابع برای بررسی درخواست تکراری
     private bool IsDuplicateRequest(string cacheKey)
@@ -221,9 +268,19 @@ public class MizonApi
         if (needAuthorized)
         {
             if (!string.IsNullOrEmpty(token))
-                httpRequestMessage.Headers.Add("Authorization", token);
+                httpRequestMessage.Headers.Add("Authorization", $"Bearer {token}");
             else throw new Exception("This method need authorized!");
         }
+    }
+
+    private void ManageInformationHeaders(HttpRequestMessage httpRequestMessage, Version? OsVersion, string? deviceIdentifier, string? deviceModel, string? deviceName, string? deviceUsername, Guid? platformVersion)
+    {
+        httpRequestMessage.Headers.Add("Mizon-OS-Version", OsVersion?.ToString());
+        httpRequestMessage.Headers.Add("Mizon-Device-Identifier", deviceIdentifier);
+        httpRequestMessage.Headers.Add("Mizon-Device-Model", deviceModel);
+        httpRequestMessage.Headers.Add("Mizon-Device-Name", deviceName);
+        httpRequestMessage.Headers.Add("Mizon-Device-Username", deviceUsername);
+        httpRequestMessage.Headers.Add("Mizon-Platform-Version", platformVersion?.ToString());
     }
 
     private void ManageToken<TApiResponse>(Func<TApiResponse, string>? propertyForToken, BaseApiResponse<TApiResponse>? baseApiResponse) where TApiResponse : IApiResponse
@@ -234,15 +291,16 @@ public class MizonApi
         if (baseApiResponse is null)
             return;
 
-        if (baseApiResponse.ResponseContent is null)
+        if (baseApiResponse.Content is null)
             return;
 
-        _token = propertyForToken(baseApiResponse.ResponseContent!);
+        _token = propertyForToken(baseApiResponse.Content!);
     }
 
     private void ManageHttpVersion(HttpRequestMessage httpRequestMessage)
     {
         httpRequestMessage.Version = HttpVersion.Version30;
+        httpRequestMessage.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
     }
 
     private void ManageCompression(HttpRequestMessage httpRequestMessage, string value, CompressionMethod compressionMethod)
@@ -278,6 +336,27 @@ public class MizonApi
         else byteArrayContent.Headers.ContentEncoding.Clear();
 
         httpRequestMessage.Content = byteArrayContent;
+    }
+
+    private static string BuildQueryString<T>(T? obj)
+    {
+        if (obj == null)
+            return "";
+
+        var properties = typeof(T).GetProperties();
+
+        var query = new List<string>();
+
+        foreach (var prop in properties)
+        {
+            var value = prop.GetValue(obj);
+            if (value == null)
+                continue;
+
+            query.Add($"{Uri.EscapeDataString(prop.Name)}={Uri.EscapeDataString(value.ToString()!)}");
+        }
+
+        return query.Count > 0 ? "?" + string.Join("&", query) : "";
     }
 
     private void ManageSetCache(string cacheKey, object? data, ClientCacheStrategy clientCacheStrategy, TimeSpan? maximumClientCacheDuration = null)

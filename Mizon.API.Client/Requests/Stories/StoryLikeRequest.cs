@@ -1,0 +1,2 @@
+namespace Mizon.API.Client.Requests.Stories;
+public sealed class StoryLikeRequest : IApiRequest { public Guid StoryPublicId { get; set; } public bool Liked { get; set; } }

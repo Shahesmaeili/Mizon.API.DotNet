@@ -1,18 +1,25 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFramework>net9.0</TargetFramework>
+		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<PublishAot>true</PublishAot>
+		<InvariantGlobalization>true</InvariantGlobalization>
+		<StripSymbols>true</StripSymbols>
+		<TrimMode>full</TrimMode>
+		<PublishTrimmed>true</PublishTrimmed>
+		<IlcOptimizationPreference>Speed</IlcOptimizationPreference>
 		<PackageId>Mizon.API</PackageId>
 		<Version>1.1.6</Version>
 		<Authors>AliShahesmaeili</Authors>
 		<Description>Implementation of Mizon API in .NET</Description>
 		<PackageTags>Mizon</PackageTags>
+		<Platforms>AnyCPU;x64</Platforms>
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="9.0.5" />
+		<PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.8" />
 		<PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="9.0.5" />
 		<PackageReference Include="Microsoft.Extensions.Http" Version="9.0.5" />
 	</ItemGroup>

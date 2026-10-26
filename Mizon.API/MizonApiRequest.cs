@@ -72,7 +72,7 @@ public class MizonApiRequest<TApiRequest, TApiResponse>
     /// <param name="apiRequest">The data to send with the request.</param>
     public MizonApiRequest(HttpMethod httpMethod, string endpoint, TApiRequest apiRequest)
     {
-        BaseApiRequest.RequestContent = apiRequest;
+        BaseApiRequest.Content = apiRequest;
         HttpMethod = httpMethod;
         Endpoint = endpoint;
     }
