@@ -4,7 +4,9 @@ Snapshot reviewed on 2026-11-10. This is shared development context, not a lock 
 
 ## Current implementation
 
-- Two .NET 10 libraries: `Mizon.API` is transport/session/cache/SignalR; `Mizon.API.Client` is typed operations, DTOs, generated metadata and media download/cache.
+- Two .NET 11 libraries: `Mizon.API` is transport/session/cache/SignalR; `Mizon.API.Client` is typed operations, DTOs, generated metadata and media download/cache.
+- SDK selection is pinned to `11.0.100` with patch roll-forward. SignalR.Client, Extensions.Caching.Memory and Extensions.Http use stable `11.0.0`. Package IDs and the existing project/package version `1.1.6` are unchanged; no NuGet package was published.
+- `Tools/SdkBenchmarks` measures production cached GET, small/large JSON transport and the actual global-search NDJSON operation with synthetic in-memory HTTP responses. It is separate from the functional diagnostic suite.
 - The working tree includes typed profile, registration, mood, following-activity, music-feature/library/playlist-detail and playback-related operations in addition to the existing catalog, story and search operations. Their backend implementations live in the server repository.
 - Search uses incremental JSON streaming through `SendStreamRequestAsync`. Media has progressive and complete-file download entry points; consumers should choose the appropriate existing method.
 - Library projects declare AOT compatibility. Per-domain serialization contexts and `Tools/SdkDiagnostics` support reflection-disabled and native checks.
@@ -19,7 +21,19 @@ Use separate worktrees for simultaneous Codex/Claude/other work. Coordinate chan
 
 ## Verification evidence and limits
 
-`PERFORMANCE.md` records earlier SDK verification dated 2026-11-08, including native diagnostics and benchmark methodology. It must be read as historical evidence with its stated limits; this documentation update did **not** rerun builds, tests, benchmarks, real API calls or database operations.
+The 2026-11-10 .NET 11 migration passed the full isolated SDK diagnostic suite on
+both the original .NET 10 baseline and .NET 11 candidate. A real .NET 11 `win-x64`
+NativeAOT diagnostic publish also completed and its executable passed the same
+transport, operations, media and loopback SignalR checks. Neither test path submits
+real accounts, uses a real backend, changes app consent or writes database data.
+
+Benchmark fixtures were verified on both runtimes. Before/after timing is a separate
+serialized cross-repository run coordinated by the root task; see
+[the migration task note](tasks/2026-11-10-net11-sdk.md). Do not treat one diagnostic
+allocation printout as a comparative benchmark or claim a total application RAM
+reduction. No visual or real-server UI checks were run by this SDK task.
+
+`PERFORMANCE.md` records earlier SDK verification dated 2026-11-08, including native diagnostics and benchmark methodology. It must be read as historical evidence with its stated limits; the earlier publication-only documentation task did **not** rerun those historical benchmarks or real API/database operations.
 
 The executable diagnostic suite and commands are in [PROJECT.md](PROJECT.md). The coordinating publication task should record its own build/test results separately. Do not infer that every current uncommitted change or every other platform client is verified by the earlier performance report.
 

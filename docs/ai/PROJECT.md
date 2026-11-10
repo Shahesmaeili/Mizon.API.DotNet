@@ -13,10 +13,11 @@ The GitHub repository is [Shahesmaeili/Mizon.API.DotNet](https://github.com/Shah
 | `Mizon.API.Client/Endpoints.cs` | Central service endpoint definitions; inspect before running integration calls |
 | `Mizon.API.Client/Serialization/` | Per-domain `System.Text.Json` source-generation contexts |
 | `Tools/SdkDiagnostics/` | Executable transport, operation, media and loopback socket checks |
+| `Tools/SdkBenchmarks/` | Reproducible real-transport/cache/NDJSON benchmarks with synthetic payloads |
 | `PERFORMANCE.md` | Dated optimization record, benchmark methodology, limitations and previous verification |
 | `Mizon.API.sln` | The two production library projects; diagnostics are run separately |
 
-Both production projects target `net10.0`, declare `IsAotCompatible`, and currently declare package version `1.1.6`. Do not automatically increment or publish NuGet packages merely because a source commit is requested. App-specific UI and EF/database behavior do not belong in these libraries.
+Both production projects target `net11.0`, declare `IsAotCompatible`, and currently declare package version `1.1.6`. Do not automatically increment or publish NuGet packages merely because a source commit is requested. App-specific UI and EF/database behavior do not belong in these libraries. `global.json` selects .NET SDK 11.0.100 with patch roll-forward; SignalR.Client, Caching.Memory and Extensions.Http use 11.0.0.
 
 ## Related repositories
 
