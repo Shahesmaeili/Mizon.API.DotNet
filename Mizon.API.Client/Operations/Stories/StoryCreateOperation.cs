@@ -7,6 +7,8 @@ public sealed class StoryCreateOperation : MizonApiRequest<StoryCreateRequest, S
 {
     public StoryCreateOperation(StoryCreateRequest request) : base(HttpMethod.POST, Endpoints.Stories.StoryCreate, request)
     {
+        RequestJsonTypeInfo = StoryPlaybackJsonContext.Default.BaseApiRequestStoryCreateRequest;
+        ResponseJsonTypeInfo = StoryPlaybackJsonContext.Default.BaseApiResponseStoryResponse;
         ClientCacheStrategy = ClientCacheStrategy.Disabled;
     }
 }

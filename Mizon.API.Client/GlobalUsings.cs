@@ -6,3 +6,5 @@ global using Mizon.API.Client.Responses.Musics;
 
 global using Mizon.API.Client.Requests.Search;
 global using Mizon.API.Client.Responses.Search;
+
+global using Mizon.API.Client.Serialization;

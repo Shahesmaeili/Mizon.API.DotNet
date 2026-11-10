@@ -4,6 +4,9 @@ public sealed class MusicContributorMusicsOperation : MizonApiRequest<MusicContr
 {
     public MusicContributorMusicsOperation(MusicContributorMusicsRequest request) : base(HttpMethod.GET, Endpoints.Musics.MusicContributorMusics, request)
     {
+        RequestQueryString = $"?MusicPublicId={request.MusicPublicId:D}";
+        RequestJsonTypeInfo = MusicCatalogJsonContext.Default.BaseApiRequestMusicContributorMusicsRequest;
+        ResponseJsonTypeInfo = MusicCatalogJsonContext.Default.BaseApiResponseMusicTabMusicsResponse;
         MaximumClientCacheDuration = TimeSpan.FromMinutes(1);
     }
 }

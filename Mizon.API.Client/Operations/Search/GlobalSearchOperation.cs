@@ -1,6 +1,3 @@
-using Mizon.API.Client.Requests.Search;
-using Mizon.API.Client.Responses.Search;
-
 namespace Mizon.API.Client.Operations.Search;
 
 public sealed class GlobalSearchOperation : MizonApiStreamRequest<GlobalSearchRequest, GlobalSearchItemResponse>
@@ -8,5 +5,7 @@ public sealed class GlobalSearchOperation : MizonApiStreamRequest<GlobalSearchRe
     public GlobalSearchOperation(GlobalSearchRequest request)
         : base(HttpMethod.GET, Endpoints.Search.Global, request)
     {
+        RequestQueryString = $"?Query={Uri.EscapeDataString(request.Query ?? string.Empty)}";
+        ResponseJsonTypeInfo = SearchJsonContext.Default.GlobalSearchItemResponse;
     }
 }

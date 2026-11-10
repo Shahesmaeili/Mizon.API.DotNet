@@ -7,6 +7,9 @@ public sealed class StoryDetailsOperation : MizonApiRequest<StoryRequest, StoryR
 {
     public StoryDetailsOperation(StoryRequest request) : base(HttpMethod.GET, Endpoints.Stories.StoryDetails, request)
     {
+        RequestJsonTypeInfo = StoryPlaybackJsonContext.Default.BaseApiRequestStoryRequest;
         ClientCacheStrategy = ClientCacheStrategy.Disabled;
+        RequestQueryString = $"?StoryPublicId={request.StoryPublicId:D}";
+        ResponseJsonTypeInfo = StoryPlaybackJsonContext.Default.BaseApiResponseStoryResponse;
     }
 }

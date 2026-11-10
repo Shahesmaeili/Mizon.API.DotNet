@@ -15,9 +15,14 @@ public static class Endpoints
 
     public static class Clients
     {
+        public const string REGISTER = $"{CLIENTS_CONTROLER}/Register";
         public const string LOGIN = $"{CLIENTS_CONTROLER}/Login";
         public const string LOGOUT = $"{CLIENTS_CONTROLER}/Logout";
         public const string ME = $"{CLIENTS_CONTROLER}/Me";
+        public const string ClientMoodTypes = $"{CLIENTS_CONTROLER}/ClientMoodTypes";
+        public const string ClientMood = $"{CLIENTS_CONTROLER}/ClientMood";
+        public const string ClientProfile = $"{CLIENTS_CONTROLER}/ClientProfile";
+        public const string FollowingActivities = $"{CLIENTS_CONTROLER}/FollowingActivities";
     }
 
 
@@ -39,7 +44,12 @@ public static class Endpoints
         public const string MusicCommentCreate = $"{MUSICS_CONTROLER}/MusicCommentCreate";
         public const string MusicContributors = $"{MUSICS_CONTROLER}/MusicContributors";
         public const string MusicView = $"{MUSICS_CONTROLER}/MusicView";
+        public const string MusicPlay = $"{MUSICS_CONTROLER}/MusicPlay";
         public const string MusicPlaylists = $"{MUSICS_CONTROLER}/MusicPlaylists";
+        public const string MusicLibrary = $"{MUSICS_CONTROLER}/MusicLibrary";
+        public const string MusicFeatures = $"{MUSICS_CONTROLER}/MusicFeatures";
+        public const string MusicLike = $"{MUSICS_CONTROLER}/MusicLike";
+        public const string MusicPlaylistDetails = $"{MUSICS_CONTROLER}/MusicPlaylistDetails";
         public const string MusicPlaylistMembership = $"{MUSICS_CONTROLER}/MusicPlaylistMembership";
         public const string MusicPlaylistCreate = $"{MUSICS_CONTROLER}/MusicPlaylistCreate";
 

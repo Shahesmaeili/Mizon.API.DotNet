@@ -1,0 +1,22 @@
+# Mizon development requirements
+
+- Start with [the shared collaboration workflow](docs/ai/COLLABORATION.md), [this repository's project map](docs/ai/PROJECT.md), and [the current handoff](docs/ai/HANDOFF.md). These instructions apply to Codex, Claude, Copilot and other assistants working here.
+- Follow the existing DTO, operation, SDK and source-generation conventions in `Mizon.API` and `Mizon.API.Client`.
+- Standing user requirement: every new or changed user-facing feature/page includes scoped MCP read-state/actions and meaningful MCP integration checks. Keep its API/SDK contracts aligned with the Windows MCP adapter and existing business services.
+- Visual-only styling changes reuse existing MCP contracts/checks; avoid artificial tools/tests that mirror colors/layout. New behavior or observable state needs meaningful MCP coverage.
+- Follow the Windows repository's [`Mcp/DEVELOPMENT.md`](https://github.com/Shahesmaeili/Mizon.Windows/blob/main/Mcp/DEVELOPMENT.md). Use the matching local checkout when available; its current path on the development laptop is `D:/source/repos/Mizon.Windows/Mizon.Windows/Mcp/DEVELOPMENT.md`. Current implemented MCP domains are **authentication (Welcome, Login and Registration), appearance, declared page navigation, and taskbar pinning**. Navigation only opens supported destinations and reads location; it does not grant access to all page contents or music/profile business actions. Each non-authentication domain has independent permissions.
+- Use explicit self-describing input/output contracts, source-generated JSON and .NET 10/NativeAOT-friendly dispatch; preserve cancellation and resource ownership. Do not introduce arbitrary invocation/reflection or unrestricted API execution tools.
+- Real users grant access inside Mizon. MCP tools/tests may not approve themselves or bypass scopes. Test denied/revoked access, cancellation/errors and cleanup as well as authorized behavior.
+- New feature tools require a separate permission group visible in consent; never reuse authentication read/control approval for music/settings/other domains. Discovery may list tools before approval; protected data/actions remain gated.
+- Use synthetic data/test doubles for writes unless the task already authorizes the real change. Do not create real accounts or submit real forms merely for a test.
+- Headless MCP tests do not replace visual, animation or UI performance checks. Do not run Windows UI automation unless the user asks; clearly report unverified visual or consent-dependent checks.
+
+## Delivery and concurrent work
+
+- Standing user requirement, effective 2026-11-10: after each completed implementation task, create a precise, scoped commit and push it to the configured GitHub remote. This is continuing authorization; do not ask for routine commit/push confirmation again. Report the commit, branch, verification and any push failure accurately. A request for advice alone does not require an empty commit.
+- Describe the actual behavior and scope in the commit subject/body, including relevant validation and known limits. Do not claim tests that were not run. Keep code, matching contracts and related documentation together when they form one change.
+- Each concurrently active assistant uses its own worktree and task branch. Coordinate ownership of shared DTOs, serialization contexts and endpoints before editing. Do not switch branches, stage files or alter the index in another assistant's working directory.
+- Preserve changes already present. Stage only the task's changes by default; a user's explicit request to publish the whole current workspace is a separate, broader scope. Never reset, clean, overwrite or commit somebody else's unfinished work merely to make your task easier.
+- Fetch and inspect incoming changes before integrating; do not force-push or rewrite published history. Push the task branch when concurrent work makes direct integration unsafe, and state whether it has been integrated.
+- Update the handoff and related project documentation with contract changes, dependencies, checks and remaining work. Markdown records context; Git synchronization and explicit ownership coordinate assistants. Files do not automatically synchronize separate AI conversations.
+- Exclude generated build output, logs, local credentials, runtime tokens and consent stores from commits. Preserve existing user-authorized configuration decisions; do not silently rotate or remove working configuration during unrelated tasks.

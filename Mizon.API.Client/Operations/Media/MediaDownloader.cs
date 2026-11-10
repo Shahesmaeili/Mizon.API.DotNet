@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 
@@ -7,13 +8,17 @@ namespace Mizon.API.Client.Operations.Media;
 
 public sealed class MediaDownloader
 {
+    private static readonly char[] InvalidCacheNameChars = Path.GetInvalidFileNameChars();
     private readonly HttpClient _httpClient;
     private readonly string _cacheRoot;
+
+    public string CacheDirectory => _cacheRoot;
 
     public MediaDownloader(HttpClient httpClient, string cacheRoot)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-        _cacheRoot = cacheRoot ?? throw new ArgumentNullException(nameof(cacheRoot));
+        ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
+        _cacheRoot = Path.GetFullPath(cacheRoot);
     }
 
     // Decide which key to use for caching. FileHash is content-based and better for dedup/resume across
@@ -29,17 +34,35 @@ public sealed class MediaDownloader
     // Returns the final cached file path (when fully downloaded)
     public string GetCachedFilePath(Responses.Media.MediaResponse info)
     {
+        ArgumentNullException.ThrowIfNull(info);
         var id = GetUniqueId(info);
         var folder = string.IsNullOrWhiteSpace(info.Category) ? "others" : info.Category;
+        ValidatePathComponent(id, nameof(info.FileHash));
+        ValidatePathComponent(folder, nameof(info.Category));
+        ValidatePathComponent(info.FileName, nameof(info.FileName));
         var dir = Path.Combine(_cacheRoot, folder, id);
         Directory.CreateDirectory(dir);
         return Path.Combine(dir, info.FileName);
     }
 
     // Partial file path used during download
-    private string GetPartialFilePath(string finalPath) => finalPath + ".part";
+    private static string GetPartialFilePath(string finalPath) => finalPath + ".part";
 
-    public bool IsCached(Responses.Media.MediaResponse info) => File.Exists(GetCachedFilePath(info));
+    public bool IsCached(Responses.Media.MediaResponse info) => IsCompleteFile(GetCachedFilePath(info), info.FileSize);
+
+    private static bool IsCompleteFile(string path, long expectedSize)
+    {
+        var file = new FileInfo(path);
+        return file.Exists && (expectedSize <= 0 || file.Length == expectedSize);
+    }
+
+    private static void ValidatePathComponent(string value, string parameterName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
+        if (value is "." or ".." || value.IndexOfAny(InvalidCacheNameChars) >= 0
+            || value.Contains('/') || value.Contains('\\') || value.EndsWith('.') || value.EndsWith(' '))
+            throw new ArgumentException("Media cache names must be single file or directory names.", parameterName);
+    }
 
     /// <summary>
     /// Downloads a media file into the local cache and returns its final local path only after
@@ -53,16 +76,18 @@ public sealed class MediaDownloader
         IProgress<MediaDownloadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        await foreach (var chunk in DownloadAsync(info, storageUri, session, cancellationToken))
+        string? finalPath = null;
+        await foreach (var chunk in DownloadCoreAsync(info, storageUri, session, includeData: false, cancellationToken).ConfigureAwait(false))
         {
             progress?.Report(new(
                 chunk.TotalDownloaded,
                 chunk.FileSize,
                 chunk.InstantaneousSpeedBytesPerSecond));
+            if (chunk.IsLastChunk)
+                finalPath = chunk.Path;
         }
 
-        var finalPath = GetCachedFilePath(info);
-        if (!File.Exists(finalPath))
+        if (finalPath is null)
             throw new IOException($"Media download completed without a cached file. MediaPublicId='{info.MediaPublicId}'.");
 
         return finalPath;
@@ -87,7 +112,7 @@ public sealed class MediaDownloader
         public long TotalDownloaded { get; }
         public double InstantaneousSpeedBytesPerSecond { get; }
         public long FileSize { get; }
-        // Direct storage link used for this download (from server StoragePath)
+        // Local partial path, or the final cache path after the file has been promoted.
         public string? Path { get; }
         // Indicates this yielded chunk belongs to the last chunk of the file
         public bool IsLastChunk { get; }
@@ -105,17 +130,50 @@ public sealed class MediaDownloader
     }
 
     // Session controller allows explicit Pause/Resume/Cancel without relying solely on external CancellationToken.
-    public sealed class DownloadSession
+    public sealed class DownloadSession : IDisposable
     {
         private int _paused;
+        private readonly object _cancellationGate = new();
         private readonly CancellationTokenSource _cts = new();
+        private readonly CancellationToken _cancellationToken;
+        private bool _disposed;
+        private bool _cancelling;
 
-        public CancellationToken CancellationToken => _cts.Token;
+        public DownloadSession() => _cancellationToken = _cts.Token;
+
+        public CancellationToken CancellationToken => _cancellationToken;
 
         public void Pause() => Interlocked.Exchange(ref _paused, 1);
         public void Resume() => Interlocked.Exchange(ref _paused, 0);
         public bool IsPaused => Volatile.Read(ref _paused) != 0;
-        public void Cancel() => _cts.Cancel();
+        public void Cancel() => CancelCore(dispose: false);
+        public void Dispose() => CancelCore(dispose: true);
+
+        private void CancelCore(bool dispose)
+        {
+            lock (_cancellationGate)
+            {
+                if (_disposed) return;
+                _disposed = dispose;
+                // The active cancellation completes disposal, including disposal requested by a callback.
+                if (_cancelling) return;
+                _cancelling = true;
+            }
+
+            try
+            {
+                // Cancellation callbacks must run outside the lock; they can reenter this session.
+                _cts.Cancel();
+            }
+            finally
+            {
+                lock (_cancellationGate)
+                {
+                    _cancelling = false;
+                    if (_disposed) _cts.Dispose();
+                }
+            }
+        }
 
         internal async Task WaitWhilePausedAsync(CancellationToken ct)
         {
@@ -128,16 +186,26 @@ public sealed class MediaDownloader
 
     // Download stream as IAsyncEnumerable of DownloadChunk. Each yielded item contains the bytes written for that chunk
     // plus metadata for progress and instantaneous speed.
-    public async IAsyncEnumerable<DownloadChunk> DownloadAsync(Responses.Media.MediaResponse info, Uri storageUri, DownloadSession? session = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<DownloadChunk> DownloadAsync(Responses.Media.MediaResponse info, Uri storageUri, DownloadSession? session = null, CancellationToken cancellationToken = default)
+        => DownloadCoreAsync(info, storageUri, session, includeData: true, cancellationToken);
+
+    private async IAsyncEnumerable<DownloadChunk> DownloadCoreAsync(Responses.Media.MediaResponse info, Uri storageUri, DownloadSession? session, bool includeData, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (info is null) throw new ArgumentNullException(nameof(info));
-        if (storageUri is null) throw new ArgumentNullException(nameof(storageUri));
+        ArgumentNullException.ThrowIfNull(info);
+        ArgumentNullException.ThrowIfNull(storageUri);
+        if (!storageUri.IsAbsoluteUri || (!storageUri.IsFile && storageUri.Scheme is not ("http" or "https")))
+            throw new ArgumentException("Media storage must be an absolute file, HTTP or HTTPS URI.", nameof(storageUri));
 
         var finalPath = GetCachedFilePath(info);
         var partialPath = GetPartialFilePath(finalPath);
+        // The app and its out-of-process Search provider share this cache. One
+        // writer owns a partial file; other callers wait, then reuse the result.
+        using var cts = session is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session.CancellationToken);
+        var token = cts?.Token ?? cancellationToken;
+        await using var cacheLease = await AcquireCacheLeaseAsync(finalPath, token).ConfigureAwait(false);
 
-        // If final file exists, yield nothing (already present). Caller can check existence first if desired.
-        if (File.Exists(finalPath))
+        // A cache hit still returns the final path to progressive consumers.
+        if (IsCompleteFile(finalPath, info.FileSize))
         {
             // File already fully downloaded and present in cache.
             // Yield a final DownloadChunk so callers receive the local path immediately.
@@ -148,169 +216,202 @@ public sealed class MediaDownloader
         }
 
 
-        // Ensure directory exists
-        Directory.CreateDirectory(Path.GetDirectoryName(finalPath)!);
+        var chunkSize = info.ChunkSize > 0 ? info.ChunkSize : 81920;
+        long? fileSize = info.FileSize > 0 ? info.FileSize : null;
+        // Tiny profile images do not need an 80 KiB buffer in both FileStreams.
+        var fileBufferSize = fileSize.HasValue ? (int)Math.Clamp(fileSize.Value, 4096L, 81920L) : 81920;
+        await using var localSource = storageUri.IsFile
+            ? new FileStream(storageUri.LocalPath, FileMode.Open, FileAccess.Read, FileShare.Read, fileBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan)
+            : null;
+        if (localSource is not null) fileSize = localSource.Length;
+        if (fileSize.HasValue) fileBufferSize = (int)Math.Clamp(fileSize.Value, 4096L, 81920L);
+        await using var file = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, fileBufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        // Only complete chunks are trusted when resuming after cancellation or a process exit.
+        var downloaded = file.Length;
+        if (fileSize.HasValue && downloaded > fileSize.Value) downloaded = 0;
+        if (downloaded != fileSize) downloaded -= downloaded % chunkSize;
+        file.SetLength(downloaded);
+        file.Position = downloaded;
+        localSource?.Seek(downloaded, SeekOrigin.Begin);
 
-        long existing = 0;
-        if (File.Exists(partialPath))
+        var chunkIndex = checked((int)(downloaded / chunkSize));
+        var scratch = ArrayPool<byte>.Shared.Rent(Math.Min(chunkSize, 81920));
+        HttpSource? remoteSource = null;
+        try
         {
-            var fi = new FileInfo(partialPath);
-            existing = fi.Length;
-        }
-
-        // Use provided values but validate
-        var chunkSize = Math.Max(1, info.ChunkSize);
-        var fileSize = storageUri.IsFile
-            ? new FileInfo(storageUri.LocalPath).Length
-            : Math.Max(0L, info.FileSize);
-        var totalChunks = (int)Math.Max(1, Math.Ceiling(fileSize / (double)chunkSize));
-
-        var startChunk = (int)(existing / chunkSize);
-
-        // Open file with async options
-        using var fs = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-        long totalDownloaded = existing;
-
-        // Combine cancellation tokens
-        CancellationToken linkedToken;
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session?.CancellationToken ?? CancellationToken.None);
-        linkedToken = cts.Token;
-
-        for (int chunkIndex = startChunk; chunkIndex < totalChunks; chunkIndex++)
-        {
-            linkedToken.ThrowIfCancellationRequested();
-
-            if (session != null)
+            while (!fileSize.HasValue || downloaded < fileSize.Value)
             {
-                await session.WaitWhilePausedAsync(linkedToken).ConfigureAwait(false);
-            }
-
-            var rangeStart = (long)chunkIndex * chunkSize;
-            var rangeEnd = Math.Min(rangeStart + chunkSize - 1, fileSize - 1);
-            if (rangeStart > rangeEnd) yield break;
-
-            var attempt = 0;
-            var maxAttempts = 6;
-            Exception? lastEx = null;
-            while (true)
-            {
-                linkedToken.ThrowIfCancellationRequested();
-                attempt++;
-                byte[]? outBuf = null;
-                int bytesRead = 0;
-                double speed = 0;
-                try
+                token.ThrowIfCancellationRequested();
+                if (session is not null) await session.WaitWhilePausedAsync(token).ConfigureAwait(false);
+                var attempt = 0;
+                byte[] data;
+                int count;
+                double speed;
+                bool finished;
+                while (true)
                 {
-                    var sw = Stopwatch.StartNew();
-                    Stream stream;
-                    HttpRequestMessage? requestMessage = null;
-                    HttpResponseMessage? responseMessage = null;
-
-                    if (storageUri.IsFile)
-                    {
-                        stream = new FileStream(
-                            storageUri.LocalPath,
-                            FileMode.Open,
-                            FileAccess.Read,
-                            FileShare.Read,
-                            81920,
-                            FileOptions.Asynchronous | FileOptions.SequentialScan);
-
-                        stream.Seek(rangeStart, SeekOrigin.Begin);
-                    }
-                    else
-                    {
-                        requestMessage = new global::System.Net.Http.HttpRequestMessage(global::System.Net.Http.HttpMethod.Get, storageUri.ToString());
-                        requestMessage.Headers.Range = new RangeHeaderValue(rangeStart, rangeEnd);
-
-                        responseMessage = await _httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, linkedToken).ConfigureAwait(false);
-                        responseMessage.EnsureSuccessStatusCode();
-
-                        stream = await responseMessage.Content.ReadAsStreamAsync(linkedToken).ConfigureAwait(false);
-                    }
-
+                    // ResponseHeadersRead only applies HttpClient.Timeout to headers. Bound body reads too.
+                    using var timeout = !storageUri.IsFile && _httpClient.Timeout != Timeout.InfiniteTimeSpan
+                        ? CancellationTokenSource.CreateLinkedTokenSource(token) : null;
+                    timeout?.CancelAfter(_httpClient.Timeout);
+                    var readToken = timeout?.Token ?? token;
+                    var started = Stopwatch.GetTimestamp();
                     try
                     {
-                        await using (stream)
+                        var expected = (int)Math.Min(chunkSize, fileSize.HasValue ? fileSize.Value - downloaded : chunkSize);
+                        Stream source;
+                        if (localSource is not null)
+                            source = localSource;
+                        else
                         {
-                            var expected = (int)(rangeEnd - rangeStart + 1);
-                            var buffer = ArrayPool<byte>.Shared.Rent(expected);
-                            try
-                            {
-                                int offset = 0;
-                                while (offset < expected)
-                                {
-                                    var read = await stream.ReadAsync(buffer, offset, expected - offset, linkedToken).ConfigureAwait(false);
-                                    if (read == 0) break;
-                                    offset += read;
-                                }
-
-                                // Write into file at position rangeStart
-                                fs.Seek(rangeStart, SeekOrigin.Begin);
-                                await fs.WriteAsync(buffer.AsMemory(0, offset), linkedToken).ConfigureAwait(false);
-                                await fs.FlushAsync(linkedToken).ConfigureAwait(false);
-
-                                sw.Stop();
-                                var elapsed = sw.Elapsed.TotalSeconds;
-                                speed = elapsed > 0 ? offset / elapsed : 0;
-
-                                bytesRead = offset;
-                                outBuf = new byte[bytesRead];
-                                Array.Copy(buffer, outBuf, bytesRead);
-                            }
-                            finally
-                            {
-                                ArrayPool<byte>.Shared.Return(buffer);
-                            }
+                            remoteSource ??= await OpenHttpSourceAsync(storageUri, downloaded, expected, fileSize, scratch, readToken).ConfigureAwait(false);
+                            fileSize ??= remoteSource.FileSize;
+                            expected = (int)Math.Min(expected, fileSize.HasValue ? fileSize.Value - downloaded : expected);
+                            source = remoteSource.Stream;
                         }
-                    }
-                    finally
-                    {
-                        responseMessage?.Dispose();
-                        requestMessage?.Dispose();
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    lastEx = ex;
-                    if (attempt < maxAttempts)
-                    {
-                        var delayMs = Math.Min(10000, 200 * (1 << (attempt - 1)));
-                        try
+
+                        data = includeData ? new byte[expected] : Array.Empty<byte>();
+                        count = 0;
+                        while (count < expected)
                         {
-                            await Task.Delay(delayMs, linkedToken).ConfigureAwait(false);
+                            var buffer = includeData ? data.AsMemory(count, Math.Min(expected - count, scratch.Length))
+                                : scratch.AsMemory(0, Math.Min(expected - count, scratch.Length));
+                            var read = await source.ReadAsync(buffer, readToken).ConfigureAwait(false);
+                            if (read == 0) break;
+                            await file.WriteAsync(buffer[..read], readToken).ConfigureAwait(false);
+                            count += read;
                         }
-                        catch (OperationCanceledException) { throw; }
-                        continue; // retry
+                        if (fileSize.HasValue && count != expected)
+                            throw new EndOfStreamException($"Media response ended at byte {downloaded + count}; expected {fileSize.Value} bytes.");
+                        finished = fileSize.HasValue ? downloaded + count == fileSize.Value : count < expected;
+                        if (finished && remoteSource is { Continuous: true, FileSize: null } && fileSize.HasValue
+                            && await source.ReadAsync(scratch.AsMemory(0, 1), readToken).ConfigureAwait(false) != 0)
+                            throw new InvalidDataException("The media response exceeds its metadata length.");
+                        if (finished && !fileSize.HasValue) fileSize = downloaded + count;
+                        if (includeData && count != data.Length) Array.Resize(ref data, count);
+                        await file.FlushAsync(readToken).ConfigureAwait(false);
+                        var seconds = Stopwatch.GetElapsedTime(started).TotalSeconds;
+                        speed = seconds > 0 ? count / seconds : 0;
+                        if (remoteSource is { Continuous: false })
+                        {
+                            await remoteSource.DisposeAsync().ConfigureAwait(false);
+                            remoteSource = null;
+                        }
+                        break;
                     }
-                    // else rethrow below
+                    catch (Exception error)
+                    {
+                        // A failed chunk must never leave an unverified tail that a later resume trusts.
+                        file.SetLength(downloaded);
+                        file.Position = downloaded;
+                        if (remoteSource is not null)
+                        {
+                            await remoteSource.DisposeAsync().ConfigureAwait(false);
+                            remoteSource = null;
+                        }
+                        token.ThrowIfCancellationRequested();
+                        if (error is OperationCanceledException && timeout?.IsCancellationRequested == true)
+                            throw new TimeoutException("The media response body did not complete within HttpClient.Timeout.", error);
+                        if (storageUri.IsFile || error is InvalidDataException || error is not (IOException or HttpRequestException) || ++attempt >= 6)
+                            throw;
+                        await Task.Delay(200 * (1 << (attempt - 1)), token).ConfigureAwait(false);
+                    }
                 }
 
-                if (outBuf != null)
+                downloaded += count;
+                if (finished)
                 {
-                    totalDownloaded += bytesRead;
-                    var isLast = chunkIndex == totalChunks - 1;
-                    var localPath = isLast ? finalPath : partialPath;
-                    yield return new DownloadChunk(outBuf, chunkIndex, totalDownloaded, speed, fileSize, localPath, isLast);
-                    break; // success - go to next chunk
+                    await file.DisposeAsync().ConfigureAwait(false);
+                    File.Move(partialPath, finalPath, overwrite: true);
                 }
+                yield return new DownloadChunk(data, chunkIndex++, downloaded, speed, fileSize ?? 0, finished ? finalPath : partialPath, finished);
+                if (finished) yield break;
+            }
 
-                // if we reach here and no outBuf produced, attempts exhausted
-                if (lastEx != null)
+            // Empty local files and a complete partial file also need a final notification.
+            token.ThrowIfCancellationRequested();
+            await file.DisposeAsync().ConfigureAwait(false);
+            File.Move(partialPath, finalPath, overwrite: true);
+            yield return new DownloadChunk(Array.Empty<byte>(), chunkIndex, downloaded, 0, downloaded, finalPath, true);
+        }
+        finally
+        {
+            if (remoteSource is not null) await remoteSource.DisposeAsync().ConfigureAwait(false);
+            ArrayPool<byte>.Shared.Return(scratch);
+        }
+    }
+
+    private async ValueTask<HttpSource> OpenHttpSourceAsync(Uri uri, long start, int count, long? fileSize, byte[] scratch, CancellationToken token)
+    {
+        using var request = new HttpRequestMessage(global::System.Net.Http.HttpMethod.Get, uri);
+        if (fileSize.HasValue)
+            request.Headers.Range = new RangeHeaderValue(start, checked(start + count - 1L));
+        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+        try
+        {
+            response.EnsureSuccessStatusCode();
+            var continuous = response.StatusCode == HttpStatusCode.OK;
+            long? responseSize;
+            if (continuous)
+                responseSize = response.Content.Headers.ContentLength;
+            else
+            {
+                var range = response.Content.Headers.ContentRange;
+                if (response.StatusCode != HttpStatusCode.PartialContent || range is null || !range.HasRange
+                    || range.Unit != "bytes" || range.From != start || range.To != Math.Min(start + count - 1L, (range.Length ?? long.MaxValue) - 1))
+                    throw new InvalidDataException("The media server returned an unexpected Content-Range.");
+                responseSize = range.Length;
+            }
+            if (fileSize.HasValue && responseSize.HasValue && fileSize != responseSize)
+                throw new InvalidDataException("The media response length does not match its metadata.");
+            var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+            // Servers may ignore Range. Consume one continuous body, skipping the existing prefix once.
+            if (continuous)
+            {
+                var remaining = start;
+                while (remaining > 0)
                 {
-                    throw lastEx;
+                    var read = await stream.ReadAsync(scratch.AsMemory(0, (int)Math.Min(scratch.Length, remaining)), token).ConfigureAwait(false);
+                    if (read == 0) throw new EndOfStreamException("The media response is shorter than the cached prefix.");
+                    remaining -= read;
                 }
             }
+            return new HttpSource(response, stream, responseSize, continuous);
         }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+    }
 
-        // finalize
-        fs.Dispose();
-        if (File.Exists(finalPath)) File.Delete(finalPath);
-        File.Move(partialPath, finalPath);
+    private sealed class HttpSource(HttpResponseMessage response, Stream stream, long? fileSize, bool continuous) : IAsyncDisposable
+    {
+        internal Stream Stream { get; } = stream;
+        internal long? FileSize { get; } = fileSize;
+        internal bool Continuous { get; } = continuous;
+
+        public ValueTask DisposeAsync()
+        {
+            response.Dispose(); // HttpContent owns and disposes the response stream.
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private static async ValueTask<FileStream> AcquireCacheLeaseAsync(string finalPath, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return new FileStream(finalPath + ".download-lock", FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            }
+            catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33)
+            {
+                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 }

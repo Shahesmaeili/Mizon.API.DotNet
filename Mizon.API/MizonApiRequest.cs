@@ -16,6 +16,12 @@ public class MizonApiRequest<TApiRequest, TApiResponse>
     /// </summary>
     protected internal BaseApiRequest<TApiRequest> BaseApiRequest { get; init; } = new();
 
+    // Operations can supply source-generated metadata and a typed GET query for
+    // NativeAOT without forcing reflection on their request/response graph.
+    protected internal System.Text.Json.Serialization.Metadata.JsonTypeInfo<BaseApiRequest<TApiRequest>>? RequestJsonTypeInfo { get; init; }
+    protected internal System.Text.Json.Serialization.Metadata.JsonTypeInfo<BaseApiResponse<TApiResponse>>? ResponseJsonTypeInfo { get; init; }
+    protected internal string? RequestQueryString { get; init; }
+
 
     /// <summary>
     /// Indicates whether the request requires authorization.
