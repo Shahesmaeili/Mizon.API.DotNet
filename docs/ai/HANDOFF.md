@@ -1,5 +1,13 @@
 # SDK handoff
 
+## Main-window profile presence — 2026-11-11
+
+The existing MizonSocket now exposes SetWindowPresenceAsync, nullable WindowPresence
+and WindowPresenceChanged. It remembers latest focus without auto-starting another
+socket, rejects stale/foreign acknowledgements, restores current intent on reconnect
+and invalidates state on stop/sign-out/disposal. See the [contract and checks](tasks/2026-11-11-profile-window-presence.md).
+Matching server and Windows changes are part of the coordinated presence task.
+
 Snapshot reviewed on 2026-11-10. This is shared development context, not a lock or proof that another assistant has read it. Use [COLLABORATION.md](COLLABORATION.md) for ownership, branches, integration and delivery.
 
 ## Current implementation

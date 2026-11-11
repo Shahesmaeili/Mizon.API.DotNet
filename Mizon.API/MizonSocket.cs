@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 
 namespace Mizon.API;
 
-public sealed class MizonSocket : IAsyncDisposable
+public sealed partial class MizonSocket : IAsyncDisposable
 {
     private readonly HubConnection _hubConnection;
     private readonly MizonApi _mizonApi;
@@ -57,7 +57,7 @@ public sealed class MizonSocket : IAsyncDisposable
         _hubConnection = new HubConnectionBuilder()
             .WithUrl(hubUrl, options =>
             {
-                options.AccessTokenProvider = () => Task.FromResult(_mizonApi.GetToken());
+                options.AccessTokenProvider = GetWindowPresenceTransportTokenAsync;
                 options.CloseTimeout = TimeSpan.FromSeconds(10);
             })
             .AddJsonProtocol(options => options.PayloadSerializerOptions.TypeInfoResolver = MizonSocketJsonContext.Default)
@@ -70,6 +70,7 @@ public sealed class MizonSocket : IAsyncDisposable
 
         _subscriptions =
         [
+            _hubConnection.On<ClientWindowPresenceResponse>("WindowPresenceChanged", ApplyWindowPresence),
             _hubConnection.On<string, string?>("ReceiveNotification", static (_, _) => { }),
             _hubConnection.On<string>("UnregistrationConfirmed", static _ => { }),
             _hubConnection.On<string, Guid, int>("EntityViewersCountUpdated", (entityType, entityId, count) =>
@@ -132,6 +133,7 @@ public sealed class MizonSocket : IAsyncDisposable
         ThrowIfDisposed();
         cancellationToken.ThrowIfCancellationRequested();
         Interlocked.Increment(ref _stopVersion);
+        ResetWindowPresence(clearDesired: true);
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeToken);
         await _operationLock.WaitAsync(cancellation.Token).ConfigureAwait(false);
         try
@@ -144,6 +146,8 @@ public sealed class MizonSocket : IAsyncDisposable
         }
         finally
         {
+            // Focus callbacks queued while StopAsync was waiting must not survive into the next login.
+            ResetWindowPresence(clearDesired: true);
             _operationLock.Release();
             SignalConnectionChanged();
         }
@@ -276,6 +280,7 @@ public sealed class MizonSocket : IAsyncDisposable
 
     private Task OnClosed(Exception? exception)
     {
+        ResetWindowPresence(clearDesired: false);
         if (exception is not null)
             Trace.TraceWarning("Mizon socket closed: {0}", exception.Message);
         NotifyConnectionState();
@@ -284,6 +289,7 @@ public sealed class MizonSocket : IAsyncDisposable
 
     private Task OnReconnecting(Exception? exception)
     {
+        ResetWindowPresence(clearDesired: false);
         if (exception is not null)
             Trace.TraceWarning("Mizon socket reconnecting: {0}", exception.Message);
         NotifyConnectionState();
@@ -318,6 +324,7 @@ public sealed class MizonSocket : IAsyncDisposable
 
     private async Task RestoreConnectionStateAsync(CancellationToken cancellationToken)
     {
+        BeginWindowPresenceConnection();
         if (_deviceRegistered)
             await _hubConnection.InvokeAsync("RegisterDevice", _mizonApi.GetToken(), cancellationToken).ConfigureAwait(false);
 
@@ -327,6 +334,8 @@ public sealed class MizonSocket : IAsyncDisposable
             await _hubConnection.InvokeAsync("JoinEntity", entity.EntityType, entity.EntityPublicId, cancellationToken).ConfigureAwait(false);
             _joinedConnectionId = _hubConnection.ConnectionId;
         }
+
+        await PublishLatestWindowPresenceAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void NotifyConnectionState()
@@ -349,6 +358,7 @@ public sealed class MizonSocket : IAsyncDisposable
     private async Task DisposeCoreAsync()
     {
         Interlocked.Exchange(ref _disposeRequested, 1);
+        ResetWindowPresence(clearDesired: true);
         await _lifetimeCancellation.CancelAsync().ConfigureAwait(false);
         SignalConnectionChanged();
         await _operationLock.WaitAsync().ConfigureAwait(false);
@@ -368,6 +378,7 @@ public sealed class MizonSocket : IAsyncDisposable
             MusicListenersSnapshotReceived = null;
             MusicListenerUpdated = null;
             MusicListenerRemoved = null;
+            WindowPresenceChanged = null;
             await _hubConnection.DisposeAsync().ConfigureAwait(false);
         }
         finally
@@ -453,5 +464,6 @@ public sealed class MusicListenerPresence
 [JsonSerializable(typeof(bool))]
 [JsonSerializable(typeof(DateTimeOffset))]
 [JsonSerializable(typeof(MusicListenerPresence))]
+[JsonSerializable(typeof(ClientWindowPresenceResponse))]
 [JsonSerializable(typeof(List<MusicListenerPresence>))]
 internal partial class MizonSocketJsonContext : JsonSerializerContext;

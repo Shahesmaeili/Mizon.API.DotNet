@@ -6,4 +6,5 @@ await TransportChecks.RunAsync();
 await OperationChecks.RunAsync();
 await MediaChecks.RunAsync();
 await SocketChecks.RunAsync();
+await WindowPresenceChecks.RunAsync();
 Console.WriteLine("SDK checks passed.");

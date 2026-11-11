@@ -128,7 +128,7 @@ internal static class SocketChecks
             throw new InvalidOperationException(message);
     }
 
-    private sealed class TestHub : IAsyncDisposable
+    internal sealed class TestHub : IAsyncDisposable
     {
         public static readonly Guid ListenerId = Guid.Parse("b943eced-70bc-42bb-8ef0-94c4e1d603ff");
         private readonly HttpListener _listener = new();
@@ -137,6 +137,7 @@ internal static class SocketChecks
         private readonly Task _acceptTask;
         private int _connectionCount;
         public int ConnectionCount => Volatile.Read(ref _connectionCount);
+        public bool HoldNextHandshake { get; set; }
         public Channel<Session> Sessions { get; } = Channel.CreateUnbounded<Session>();
         public string Url { get; }
 
@@ -189,7 +190,10 @@ internal static class SocketChecks
             }
 
             var webSocket = await context.AcceptWebSocketAsync(null);
-            using var session = new Session(webSocket.WebSocket);
+            var bearer = context.Request.Headers["Authorization"]?.Replace("Bearer ", string.Empty, StringComparison.Ordinal);
+            var identity = bearer is null ? Guid.Empty : ReadSubject(bearer);
+            using var session = new Session(webSocket.WebSocket, context.Request.QueryString["id"]!, identity, HoldNextHandshake);
+            HoldNextHandshake = false;
             Interlocked.Increment(ref _connectionCount);
             await Sessions.Writer.WriteAsync(session, _cancellation.Token);
             await session.RunAsync(_cancellation.Token);
@@ -205,13 +209,27 @@ internal static class SocketChecks
             _cancellation.Dispose();
         }
 
-        public sealed record Invocation(string Target, Guid? EntityId = null, string? Token = null, long? PositionMilliseconds = null);
+        private static Guid ReadSubject(string token)
+        {
+            var body = token.Split('.')[1].Replace('-', '+').Replace('_', '/');
+            using var json = JsonDocument.Parse(Convert.FromBase64String(body.PadRight(body.Length + (4 - body.Length % 4) % 4, '=')));
+            return json.RootElement.GetProperty("sub").GetGuid();
+        }
 
-        public sealed class Session(WebSocket socket) : IDisposable
+        public sealed record Invocation(string Target, Guid? EntityId = null, string? Token = null,
+            long? PositionMilliseconds = null, bool? IsActive = null, long? Revision = null);
+
+        public sealed class Session(WebSocket socket, string connectionId, Guid clientId, bool holdHandshake) : IDisposable
         {
             private readonly WebSocket _socket = socket;
+            private readonly SemaphoreSlim _sendGate = new(1, 1);
             private Guid _entityId;
             public volatile bool HoldNextJoin;
+            public volatile bool HoldNextPresence;
+            private (string Id, string Json)? _heldPresence;
+            public TaskCompletionSource ReleaseHandshake { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public string ConnectionId => connectionId;
+            public Guid ClientId => clientId;
             public Channel<Invocation> Invocations { get; } = Channel.CreateUnbounded<Invocation>();
             public void Abort() => _socket.Abort();
 
@@ -239,6 +257,8 @@ internal static class SocketChecks
                             var root = document.RootElement;
                             if (root.TryGetProperty("protocol", out _))
                             {
+                                if (holdHandshake)
+                                    await ReleaseHandshake.Task.WaitAsync(cancellationToken);
                                 await SendAsync("{}", cancellationToken);
                                 continue;
                             }
@@ -252,9 +272,28 @@ internal static class SocketChecks
                                 "JoinEntity" => new Invocation(name, arguments[1].GetGuid()),
                                 "RegisterDevice" => new Invocation(name, Token: arguments[0].GetString()),
                                 "UpdateMusicPlayback" => new Invocation(name, arguments[0].GetGuid(), PositionMilliseconds: arguments[1].GetInt64()),
+                                "SetWindowPresence" => new Invocation(name, IsActive: arguments[0].GetBoolean(), Revision: arguments[1].GetInt64()),
                                 _ => new Invocation(name)
                             };
                             await Invocations.Writer.WriteAsync(invocation, cancellationToken);
+                            if (name == "SetWindowPresence")
+                            {
+                                var response = new ClientWindowPresenceResponse
+                                {
+                                    ClientPublicId = clientId, ConnectionId = connectionId,
+                                    IsOnline = invocation.IsActive!.Value, Revision = invocation.Revision!.Value,
+                                };
+                                var json = JsonSerializer.Serialize(response, WindowPresenceTestJsonContext.Default.ClientWindowPresenceResponse);
+                                var presenceInvocationId = root.GetProperty("invocationId").GetRawText();
+                                if (HoldNextPresence)
+                                {
+                                    HoldNextPresence = false;
+                                    _heldPresence = (presenceInvocationId, json);
+                                }
+                                else
+                                    await CompletePresenceAsync(presenceInvocationId, json, cancellationToken);
+                                continue;
+                            }
                             if (name == "JoinEntity")
                             {
                                 _entityId = arguments[1].GetGuid();
@@ -285,8 +324,29 @@ internal static class SocketChecks
             private Task SendEventAsync(string target, string arguments, CancellationToken cancellationToken) =>
                 SendAsync($"{{\"type\":1,\"target\":\"{target}\",\"arguments\":[{arguments}]}}", cancellationToken);
 
-            private async Task SendAsync(string json, CancellationToken cancellationToken) =>
-                await _socket.SendAsync(Encoding.UTF8.GetBytes(json + "\u001e").AsMemory(), WebSocketMessageType.Text, true, cancellationToken);
+            public Task SendWindowPresenceAsync(ClientWindowPresenceResponse response, CancellationToken cancellationToken) =>
+                SendEventAsync("WindowPresenceChanged", JsonSerializer.Serialize(response,
+                    WindowPresenceTestJsonContext.Default.ClientWindowPresenceResponse), cancellationToken);
+
+            public async Task ReleasePresenceAsync(CancellationToken cancellationToken)
+            {
+                var held = _heldPresence ?? throw new InvalidOperationException("No presence invocation is held.");
+                _heldPresence = null;
+                await CompletePresenceAsync(held.Id, held.Json, cancellationToken);
+            }
+
+            private async Task CompletePresenceAsync(string id, string json, CancellationToken cancellationToken)
+            {
+                await SendEventAsync("WindowPresenceChanged", json, cancellationToken);
+                await SendAsync($"{{\"type\":3,\"invocationId\":{id},\"result\":{json}}}", cancellationToken);
+            }
+
+            private async Task SendAsync(string json, CancellationToken cancellationToken)
+            {
+                await _sendGate.WaitAsync(cancellationToken);
+                try { await _socket.SendAsync(Encoding.UTF8.GetBytes(json + "\u001e").AsMemory(), WebSocketMessageType.Text, true, cancellationToken); }
+                finally { _sendGate.Release(); }
+            }
 
             private static string Presence(long position, bool isPlaying) =>
                 $"{{\"clientPublicId\":\"{ListenerId:D}\",\"firstName\":\"آزمایش\",\"lastName\":\"Socket\",\"username\":\"listener\",\"profileMediaPublicId\":null,\"positionMilliseconds\":{position},\"isPlaying\":{(isPlaying ? "true" : "false")},\"updatedAtUtc\":\"2026-11-08T00:00:00+00:00\"}}";
