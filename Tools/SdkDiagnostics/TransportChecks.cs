@@ -87,6 +87,7 @@ internal static class TransportChecks
         Check(api.GetToken() == "active", "failed login does not update token");
         handler.Json = null;
 
+        await CheckApplicationLanguageAsync();
         await CheckStreamingAsync();
         await CheckDependencyInjectionAsync();
         Check(handler.ResponseStreams.All(s => s.WasDisposed), "response streams disposed on all normal/error paths");
@@ -99,6 +100,31 @@ internal static class TransportChecks
         pendingApi.Dispose();
         Check((await pendingRequest.WaitAsync(TimeSpan.FromSeconds(2))).Error?.Code == 105, "disposal cancels active requests with externally owned HttpClient");
         Console.WriteLine("Transport: cache isolation, compression, cancellation, errors, streaming, DI and ownership passed.");
+    }
+
+    private static async Task CheckApplicationLanguageAsync()
+    {
+        using var cache = new MemoryCache(new MemoryCacheOptions());
+        using var handler = new FakeHandler();
+        using var http = new HttpClient(handler);
+        http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("de-DE");
+        var language = "fa-IR";
+        using var api = new MizonApi(http, cache, ownsHttpClient: false, () => language);
+
+        var get = new TestOperation(cache: true, authorized: false);
+        Check((await api.SendRequestAsync(get)).IsSuccess && handler.LastLanguage == "fa-IR",
+            "selected application language overrides the HTTP client's default");
+        Check((await api.SendRequestAsync(get)).IsFromCache, "same language reuses cache");
+        language = "en-US";
+        Check(!(await api.SendRequestAsync(get)).IsFromCache && handler.LastLanguage == "en-US",
+            "language changes bypass cached responses in another language");
+        Check((await api.SendRequestAsync(new TestOperation(post: true, authorized: false))).IsSuccess
+            && handler.LastLanguage == "en-US", "POST uses the current application language");
+        language = "fa-IR";
+        handler.Json = "{\"text\":\"first\"}\n";
+        await using var items = api.SendStreamRequestAsync(new StreamOperation()).GetAsyncEnumerator();
+        Check(await items.MoveNextAsync() && handler.LastLanguage == "fa-IR", "NDJSON uses the current application language");
+        Check(http.DefaultRequestHeaders.AcceptLanguage.ToString() == "de-DE", "request headers leave shared defaults alone");
     }
 
     private static async Task CheckStreamingAsync()
@@ -210,11 +236,13 @@ internal static class TransportChecks
         public TaskCompletionSource? Gate;
         public string? LastBodyText;
         public Uri? LastUri;
+        public string? LastLanguage;
         public readonly List<TrackedMemoryStream> ResponseStreams = [];
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Interlocked.Increment(ref Count);
             LastUri = request.RequestUri;
+            LastLanguage = request.Headers.AcceptLanguage.ToString();
             if (RequireConfiguredHeader) Check(request.Headers.Contains("X-Diagnostics"), "configured HTTP handler was bypassed");
             if (Wait) await Task.Delay(Timeout.Infinite, token);
             if (Gate is { } gate) await gate.Task.WaitAsync(token);

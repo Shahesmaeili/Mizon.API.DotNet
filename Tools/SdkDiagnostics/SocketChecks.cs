@@ -18,7 +18,8 @@ internal static class SocketChecks
         await using var server = new TestHub();
         using var httpClient = new HttpClient();
         using var cache = new MemoryCache(new MemoryCacheOptions());
-        var api = new MizonApi(httpClient, cache);
+        var language = "fa-IR";
+        using var api = new MizonApi(httpClient, cache, ownsHttpClient: false, () => Volatile.Read(ref language));
         var clientId = Guid.NewGuid();
         api.SetToken(CreateToken(clientId));
         await using var socket = new MizonSocket(api, server.Url);
@@ -39,6 +40,8 @@ internal static class SocketChecks
 
         await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => socket.StartAsync(token)));
         var firstSession = await server.Sessions.Reader.ReadAsync(token);
+        Ensure(firstSession.Language == "fa-IR" && firstSession.NegotiatedLanguage == "fa-IR",
+            "Negotiation and WebSocket upgrade use the application language.");
         Ensure(server.ConnectionCount == 1, "Concurrent starts establish one connection.");
         await socket.RegisterDeviceAsync(token);
         var firstRegistration = await firstSession.Invocations.Reader.ReadAsync(token);
@@ -81,8 +84,11 @@ internal static class SocketChecks
             if (state == HubConnectionState.Connected && server.ConnectionCount > 1)
                 reconnected.TrySetResult();
         };
+        Volatile.Write(ref language, "en-US");
         firstSession.Abort();
         var secondSession = await server.Sessions.Reader.ReadAsync(token);
+        Ensure(secondSession.Language == "en-US" && secondSession.NegotiatedLanguage == "en-US",
+            "Reconnect reads the current application language.");
         await reconnected.Task.WaitAsync(token);
         var restoredRegistration = await secondSession.Invocations.Reader.ReadAsync(token);
         var restoredJoin = await secondSession.Invocations.Reader.ReadAsync(token);
@@ -134,6 +140,7 @@ internal static class SocketChecks
         private readonly HttpListener _listener = new();
         private readonly CancellationTokenSource _cancellation = new();
         private readonly ConcurrentBag<Task> _requests = [];
+        private readonly ConcurrentDictionary<string, string> _negotiatedLanguages = new(StringComparer.Ordinal);
         private readonly Task _acceptTask;
         private int _connectionCount;
         public int ConnectionCount => Volatile.Read(ref _connectionCount);
@@ -174,6 +181,7 @@ internal static class SocketChecks
             if (context.Request.Url!.AbsolutePath.EndsWith("/negotiate", StringComparison.Ordinal))
             {
                 var id = Guid.NewGuid().ToString("N");
+                if (context.Request.Headers["Accept-Language"] is { } language) _negotiatedLanguages[id] = language;
                 var body = Encoding.UTF8.GetBytes($"{{\"negotiateVersion\":1,\"connectionId\":\"{id}\",\"connectionToken\":\"{id}\",\"availableTransports\":[{{\"transport\":\"WebSockets\",\"transferFormats\":[\"Text\",\"Binary\"]}}]}}");
                 context.Response.ContentType = "application/json";
                 context.Response.ContentLength64 = body.Length;
@@ -192,7 +200,13 @@ internal static class SocketChecks
             var webSocket = await context.AcceptWebSocketAsync(null);
             var bearer = context.Request.Headers["Authorization"]?.Replace("Bearer ", string.Empty, StringComparison.Ordinal);
             var identity = bearer is null ? Guid.Empty : ReadSubject(bearer);
-            using var session = new Session(webSocket.WebSocket, context.Request.QueryString["id"]!, identity, HoldNextHandshake);
+            var connectionId = context.Request.QueryString["id"]!;
+            _negotiatedLanguages.TryRemove(connectionId, out var negotiatedLanguage);
+            using var session = new Session(webSocket.WebSocket, connectionId, identity, HoldNextHandshake)
+            {
+                Language = context.Request.Headers["Accept-Language"],
+                NegotiatedLanguage = negotiatedLanguage
+            };
             HoldNextHandshake = false;
             Interlocked.Increment(ref _connectionCount);
             await Sessions.Writer.WriteAsync(session, _cancellation.Token);
@@ -229,6 +243,8 @@ internal static class SocketChecks
             private (string Id, string Json)? _heldPresence;
             public TaskCompletionSource ReleaseHandshake { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public string ConnectionId => connectionId;
+            public string? Language { get; init; }
+            public string? NegotiatedLanguage { get; init; }
             public Guid ClientId => clientId;
             public Channel<Invocation> Invocations { get; } = Channel.CreateUnbounded<Invocation>();
             public void Abort() => _socket.Abort();

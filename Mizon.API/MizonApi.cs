@@ -17,6 +17,7 @@ public sealed class MizonApi : IDisposable
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _memoryCache;
     private readonly bool _ownsHttpClient;
+    private readonly Func<string>? _languageProvider;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly CancellationToken _lifetimeToken;
     private SessionState _session = new(null, Interlocked.Increment(ref _nextCacheScope));
@@ -28,12 +29,19 @@ public sealed class MizonApi : IDisposable
     }
 
     public MizonApi(HttpClient httpClient, IMemoryCache memoryCache, bool ownsHttpClient)
+        : this(httpClient, memoryCache, ownsHttpClient, languageProvider: null)
+    {
+    }
+
+    /// <summary>Reads the application language (a BCP 47 tag) when each request is created.</summary>
+    public MizonApi(HttpClient httpClient, IMemoryCache memoryCache, bool ownsHttpClient, Func<string>? languageProvider)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentNullException.ThrowIfNull(memoryCache);
         _httpClient = httpClient;
         _memoryCache = memoryCache;
         _ownsHttpClient = ownsHttpClient;
+        _languageProvider = languageProvider;
         _lifetimeToken = _lifetimeCancellation.Token;
     }
 
@@ -51,6 +59,8 @@ public sealed class MizonApi : IDisposable
     }
 
     public string? GetToken() => Volatile.Read(ref _session).Token;
+
+    internal string? GetRequestLanguage() => _languageProvider?.Invoke();
 
     public void ClearToken() => Interlocked.Exchange(ref _session,
         new SessionState(null, Interlocked.Increment(ref _nextCacheScope)));
@@ -75,7 +85,7 @@ public sealed class MizonApi : IDisposable
 
         var query = mizonApiRequest.RequestQueryString ?? BuildQueryString(mizonApiRequest.BaseApiRequest, mizonApiRequest.RequestJsonTypeInfo);
         using var request = CreateRequest(System.Net.Http.HttpMethod.Get, mizonApiRequest.Endpoint + query,
-            mizonApiRequest.NeedAuthorized, Volatile.Read(ref _session), Volatile.Read(ref _device));
+            mizonApiRequest.NeedAuthorized, Volatile.Read(ref _session), Volatile.Read(ref _device), GetRequestLanguage());
         using var requestLifetime = CreateRequestLifetime(cancellationToken, mizonApiRequest.CallTimeoutDuration);
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestLifetime.Token).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
@@ -106,6 +116,7 @@ public sealed class MizonApi : IDisposable
             var isGet = mizonApiRequest.HttpMethod == HttpMethod.GET;
             var query = isGet ? mizonApiRequest.RequestQueryString ?? BuildQueryString(mizonApiRequest.BaseApiRequest, mizonApiRequest.RequestJsonTypeInfo) : string.Empty;
             var endpoint = mizonApiRequest.Endpoint + query;
+            var language = GetRequestLanguage();
             if (mizonApiRequest.NeedAuthorized && string.IsNullOrEmpty(session.Token))
                 throw new InvalidOperationException("This method needs authorization.");
             if (!isGet && mizonApiRequest.HttpMethod != HttpMethod.POST)
@@ -116,13 +127,14 @@ public sealed class MizonApi : IDisposable
                 ResolveTypeInfo(mizonApiRequest.RequestJsonTypeInfo));
             var cacheDuration = mizonApiRequest.MaximumClientCacheDuration ?? TimeSpan.FromMinutes(5);
             var useCache = mizonApiRequest.ClientCacheStrategy != ClientCacheStrategy.Disabled && cacheDuration > TimeSpan.Zero;
-            var cacheKey = new ResponseCacheKey(session.CacheScope, device?.CacheScope ?? 0, endpoint,
+            var cacheKey = new ResponseCacheKey(session.CacheScope, device?.CacheScope ?? 0,
+                useCache ? language ?? _httpClient.DefaultRequestHeaders.AcceptLanguage.ToString() : null, endpoint,
                 mizonApiRequest.HttpMethod, mizonApiRequest.NeedAuthorized, typeof(Response), useCache && requestBytes is not null ? Hash(requestBytes) : string.Empty);
             if (useCache && _memoryCache.TryGetValue<CachedResponse<Response>>(cacheKey, out var cached) && cached is not null)
                 return new BaseApiResponse<Response> { Content = cached.Content, IsFromCache = true };
 
             using var request = CreateRequest(isGet ? System.Net.Http.HttpMethod.Get : System.Net.Http.HttpMethod.Post,
-                endpoint, mizonApiRequest.NeedAuthorized, session, device);
+                endpoint, mizonApiRequest.NeedAuthorized, session, device, language);
             if (requestBytes is not null)
                 request.Content = CreateContent(requestBytes, mizonApiRequest.CompressionMethod);
             using var requestLifetime = CreateRequestLifetime(callerToken, mizonApiRequest.CallTimeoutDuration);
@@ -227,7 +239,7 @@ public sealed class MizonApi : IDisposable
         }
     }
 
-    private static HttpRequestMessage CreateRequest(System.Net.Http.HttpMethod method, string endpoint, bool needAuthorized, SessionState session, DeviceInformation? device)
+    private static HttpRequestMessage CreateRequest(System.Net.Http.HttpMethod method, string endpoint, bool needAuthorized, SessionState session, DeviceInformation? device, string? language)
     {
         if (needAuthorized && string.IsNullOrEmpty(session.Token))
             throw new InvalidOperationException("This method needs authorization.");
@@ -238,6 +250,7 @@ public sealed class MizonApi : IDisposable
         };
         try
         {
+            if (language is { Length: > 0 }) request.Headers.AcceptLanguage.Add(new StringWithQualityHeaderValue(language));
             if (needAuthorized) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.Token);
             if (device is not null)
             {
@@ -305,5 +318,5 @@ public sealed class MizonApi : IDisposable
     private sealed record SessionState(string? Token, long CacheScope);
     private sealed record DeviceInformation(string OsVersion, string Identifier, string Model, string Name, string Username, string PlatformVersion, long CacheScope);
     private sealed record CachedResponse<T>(T? Content) where T : IApiResponse;
-    private readonly record struct ResponseCacheKey(long Session, long Device, string Endpoint, HttpMethod Method, bool Authorized, Type ResponseType, string BodyHash);
+    private readonly record struct ResponseCacheKey(long Session, long Device, string? Language, string Endpoint, HttpMethod Method, bool Authorized, Type ResponseType, string BodyHash);
 }

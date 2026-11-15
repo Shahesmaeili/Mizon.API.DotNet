@@ -59,6 +59,15 @@ public sealed partial class MizonSocket : IAsyncDisposable
             {
                 options.AccessTokenProvider = GetWindowPresenceTransportTokenAsync;
                 options.CloseTimeout = TimeSpan.FromSeconds(10);
+                options.HttpMessageHandlerFactory = inner => new LanguageHeaderHandler(inner, mizonApi);
+                if (!OperatingSystem.IsBrowser())
+                {
+                    options.WebSocketConfiguration = socket =>
+                    {
+                        if (mizonApi.GetRequestLanguage() is { Length: > 0 } language)
+                            socket.SetRequestHeader("Accept-Language", language);
+                    };
+                }
             })
             .AddJsonProtocol(options => options.PayloadSerializerOptions.TypeInfoResolver = MizonSocketJsonContext.Default)
             .WithAutomaticReconnect()
@@ -82,6 +91,16 @@ public sealed partial class MizonSocket : IAsyncDisposable
             _hubConnection.On<Guid, Guid>("MusicListenerRemoved", (musicPublicId, clientPublicId) =>
                 MusicListenerRemoved?.Invoke(this, new(musicPublicId, clientPublicId)))
         ];
+    }
+
+    private sealed class LanguageHeaderHandler(HttpMessageHandler inner, MizonApi api) : DelegatingHandler(inner)
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (api.GetRequestLanguage() is { Length: > 0 } language)
+                request.Headers.AcceptLanguage.ParseAdd(language);
+            return base.SendAsync(request, cancellationToken);
+        }
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)

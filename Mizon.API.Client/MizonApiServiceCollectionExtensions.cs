@@ -6,7 +6,10 @@ namespace Mizon.API.Client;
 
 public static class MizonApiServiceCollectionExtensions
 {
-    public static IServiceCollection AddMizonApi(this IServiceCollection services)
+    public static IServiceCollection AddMizonApi(this IServiceCollection services) => AddMizonApi(services, languageProvider: null);
+
+    /// <summary>Registers the API with a callback that returns the current app language for each request.</summary>
+    public static IServiceCollection AddMizonApi(this IServiceCollection services, Func<string>? languageProvider)
     {
         services.AddMemoryCache();
         services.AddHttpClient(nameof(MizonApi), client => client.Timeout = Timeout.InfiniteTimeSpan)
@@ -21,7 +24,7 @@ public static class MizonApiServiceCollectionExtensions
         // rather than replacing a typed-client registration with an unconfigured HttpClient.
         services.TryAddSingleton(sp => new MizonApi(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(MizonApi)),
-            sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(), ownsHttpClient: true));
+            sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>(), ownsHttpClient: true, languageProvider));
         services.TryAddSingleton(sp => new MizonSocket(sp.GetRequiredService<MizonApi>(), Endpoints.MIZON_HUB_URL));
         return services;
     }
