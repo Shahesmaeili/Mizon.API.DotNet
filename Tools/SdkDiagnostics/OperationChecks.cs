@@ -42,6 +42,12 @@ internal static class OperationChecks
             responseJson: $$$"""{"content":{"personPublicId":"{{{PublicId}}}","followingCount":null,"coverMediaPublicId":"{{{OtherPublicId}}}"}}""");
         Ensure(person.PersonPublicId == Id && person.FollowingCount is null && person.CoverMediaPublicId == OtherId,
             "Artist identity, nullable count and cover contract");
+        Ensure(person.ModelYawInDegrees is null, "Missing artist model yaw preserves the client default.");
+        var artistPose = await CheckAsync(api, handler, new PersonProfileOperation(new() { PersonPublicId = OtherId }),
+            "/Persons/PersonProfile", "GET", $"?PersonPublicId={OtherPublicId}",
+            responseJson: $$$"""{"content":{"personPublicId":"{{{OtherPublicId}}}","modelMediaPublicId":"{{{PublicId}}}","modelYawInDegrees":180}}""");
+        Ensure(artistPose.ModelMediaPublicId == Id && artistPose.ModelYawInDegrees == 180,
+            "Artist model media and configured yaw deserialize without reflection.");
         var featuredPeople = await CheckAsync(api, handler, new FeaturedPersonsOperation(new() { TypeCode = "music" }),
             "/Persons/FeaturedPersons", "GET", "?TypeCode=music",
             responseJson: $$$"""{"content":{"persons":[{"personPublicId":"{{{PublicId}}}","sortOrder":1,"monthlyListenersCount":3,"dailyPlays":[0,2],"latestMusics":[{"publicId":"{{{OtherPublicId}}}","title":"Song","duration":"00:03:15"}]}]}}""");
