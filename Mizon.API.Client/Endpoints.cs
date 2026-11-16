@@ -1,4 +1,4 @@
-﻿namespace Mizon.API.Client;
+namespace Mizon.API.Client;
 
 public static class Endpoints
 {
@@ -30,6 +30,7 @@ public static class Endpoints
     {
         public const string PersonProfile = $"{BASE_URL}/Persons/PersonProfile";
         public const string PersonMusics = $"{BASE_URL}/Persons/PersonMusics";
+        public const string FeaturedPersons = $"{BASE_URL}/Persons/FeaturedPersons";
         public const string PersonFollow = $"{BASE_URL}/Persons/PersonFollow";
     }
 

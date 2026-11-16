@@ -42,6 +42,12 @@ internal static class OperationChecks
             responseJson: $$$"""{"content":{"personPublicId":"{{{PublicId}}}","followingCount":null,"coverMediaPublicId":"{{{OtherPublicId}}}"}}""");
         Ensure(person.PersonPublicId == Id && person.FollowingCount is null && person.CoverMediaPublicId == OtherId,
             "Artist identity, nullable count and cover contract");
+        var featuredPeople = await CheckAsync(api, handler, new FeaturedPersonsOperation(new() { TypeCode = "music" }),
+            "/Persons/FeaturedPersons", "GET", "?TypeCode=music",
+            responseJson: $$$"""{"content":{"persons":[{"personPublicId":"{{{PublicId}}}","sortOrder":1,"monthlyListenersCount":3,"dailyPlays":[0,2],"latestMusics":[{"publicId":"{{{OtherPublicId}}}","title":"Song","duration":"00:03:15"}]}]}}""");
+        Ensure(featuredPeople.Persons[0].PersonPublicId == Id && featuredPeople.Persons[0].DailyPlays.SequenceEqual([0, 2])
+            && featuredPeople.Persons[0].LatestMusics[0].Duration == TimeSpan.FromSeconds(195),
+            "Featured person identity, activities and latest tracks deserialize without reflection.");
         var artistTracks = await CheckAsync(api, handler, new PersonMusicsOperation(new() { PersonPublicId = Id, BeforeMusicPublicId = OtherId }),
             "/Persons/PersonMusics", "GET", $"?PersonPublicId={PublicId}&BeforeMusicPublicId={OtherPublicId}",
             responseJson: $$$"""{"content":{"nextBeforeMusicPublicId":"{{{OtherPublicId}}}","musics":[{"publicId":"{{{PublicId}}}","title":"Song","contributors":[{"firstName":"Test"}]}]}}""");

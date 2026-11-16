@@ -11,4 +11,6 @@ namespace Mizon.API.Client.Serialization;
 [JsonSerializable(typeof(BaseApiResponse<PersonMusicsResponse>))]
 [JsonSerializable(typeof(BaseApiRequest<PersonFollowRequest>))]
 [JsonSerializable(typeof(BaseApiResponse<PersonFollowResponse>))]
+[JsonSerializable(typeof(BaseApiRequest<FeaturedPersonsRequest>))]
+[JsonSerializable(typeof(BaseApiResponse<FeaturedPersonsResponse>))]
 internal partial class PersonJsonContext : JsonSerializerContext;
