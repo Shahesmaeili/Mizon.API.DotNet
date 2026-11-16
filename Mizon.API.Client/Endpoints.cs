@@ -26,6 +26,13 @@ public static class Endpoints
     }
 
 
+    public static class Persons
+    {
+        public const string PersonProfile = $"{BASE_URL}/Persons/PersonProfile";
+        public const string PersonMusics = $"{BASE_URL}/Persons/PersonMusics";
+        public const string PersonFollow = $"{BASE_URL}/Persons/PersonFollow";
+    }
+
     public static class Musics
     {
         public const string MUSIC = $"{MUSICS_CONTROLER}/Music";

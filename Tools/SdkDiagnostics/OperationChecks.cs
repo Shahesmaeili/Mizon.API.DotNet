@@ -7,6 +7,7 @@ using Mizon.API;
 using Mizon.API.Client.Operations.Clients;
 using Mizon.API.Client.Operations.Media;
 using Mizon.API.Client.Operations.Musics;
+using Mizon.API.Client.Operations.Persons;
 using Mizon.API.Client.Operations.Search;
 using Mizon.API.Client.Operations.Stories;
 using Mizon.API.Client.Requests.Stories;
@@ -36,6 +37,19 @@ internal static class OperationChecks
         await CheckAsync(api, handler, new ClientMoodOperation(new() { ClientMoodTypePublicId = Id }), "/Clients/ClientMood", "POST");
         await CheckAsync(api, handler, new ClientProfileOperation(new() { ClientPublicId = Id }), "/Clients/ClientProfile", "GET", $"?ClientPublicId={PublicId}");
         await CheckAsync(api, handler, new FollowingActivitiesOperation(new() { Scope = "music", Cursor = "next", PageSize = 4 }), "/Clients/FollowingActivities", "POST");
+        var person = await CheckAsync(api, handler, new PersonProfileOperation(new() { PersonPublicId = Id }),
+            "/Persons/PersonProfile", "GET", $"?PersonPublicId={PublicId}",
+            responseJson: $$$"""{"content":{"personPublicId":"{{{PublicId}}}","followingCount":null,"coverMediaPublicId":"{{{OtherPublicId}}}"}}""");
+        Ensure(person.PersonPublicId == Id && person.FollowingCount is null && person.CoverMediaPublicId == OtherId,
+            "Artist identity, nullable count and cover contract");
+        var artistTracks = await CheckAsync(api, handler, new PersonMusicsOperation(new() { PersonPublicId = Id, BeforeMusicPublicId = OtherId }),
+            "/Persons/PersonMusics", "GET", $"?PersonPublicId={PublicId}&BeforeMusicPublicId={OtherPublicId}",
+            responseJson: $$$"""{"content":{"nextBeforeMusicPublicId":"{{{OtherPublicId}}}","musics":[{"publicId":"{{{PublicId}}}","title":"Song","contributors":[{"firstName":"Test"}]}]}}""");
+        Ensure(artistTracks.Musics[0].Contributors[0].FirstName == "Test" && artistTracks.NextBeforeMusicPublicId == OtherId,
+            "Artist track cursor and nested credit");
+        await CheckAsync(api, handler, new PersonFollowOperation(new() { PersonPublicId = Id, Following = false }),
+            "/Persons/PersonFollow", "POST", bodyCheck: body =>
+                Ensure(body.GetProperty("personPublicId").GetGuid() == Id && !body.GetProperty("following").GetBoolean(), "Explicit unfollow body."));
         await CheckAsync(api, handler, new MediaOperation(new() { MediaPublicId = Id }), "/Medias/Media", "GET", $"?MediaPublicId={PublicId}");
 
         await CheckAsync(api, handler, new MusicOperation(new() { MusicPublicId = Id }), "/Musics/Music", "GET", $"?MusicPublicId={PublicId}");
@@ -100,7 +114,7 @@ internal static class OperationChecks
             count++;
         }
         Ensure(count == 2, "Streaming search lost a result.");
-        Console.WriteLine("PASS: all 40 built-in operations; GET routing, auth, request/response metadata, nested JSON, logout repeat and streamed search with reflection disabled.");
+        Console.WriteLine("PASS: all checked built-in operations (including artist profile, tracks and follow); GET routing, auth, request/response metadata, nested JSON, logout repeat and streamed search with reflection disabled.");
     }
 
     private static async Task<TResponse> CheckAsync<TRequest, TResponse>(MizonApi api, OperationHandler handler,
