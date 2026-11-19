@@ -54,3 +54,5 @@ The executable diagnostic suite and commands are in [PROJECT.md](PROJECT.md). Th
 5. Update this handoff or a task note with scope, files, dependencies, exact checks, limitations and unfinished work; commit and push the task's changes and verify the remote ref.
 
 Do not put credentials, runtime tokens, local approval stores, personal query traces or build outputs into handoff notes. Git synchronization and explicit file ownership provide coordination; Markdown alone does not make separate AI sessions aware of each other in real time.
+
+Track details now deserialize optional active MusicVideo media and cover identifiers through the existing generated GET Music contract. The matching server and schema changes are needed to populate them.
