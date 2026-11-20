@@ -2,6 +2,12 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 Console.WriteLine($"DynamicCode={RuntimeFeature.IsDynamicCodeSupported}; JsonReflection={JsonSerializer.IsReflectionEnabledByDefault}");
+if (args is ["--operations-only"])
+{
+    await OperationChecks.RunAsync();
+    return;
+}
+
 await TransportChecks.RunAsync();
 await OperationChecks.RunAsync();
 await MediaChecks.RunAsync();

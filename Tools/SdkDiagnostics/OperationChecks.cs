@@ -80,6 +80,28 @@ internal static class OperationChecks
         await CheckAsync(api, handler, new MusicCommentsOperation(new() { MusicPublicId = Id, MusicCommentPublicId = OtherId }), "/Musics/MusicComments", "GET", $"?MusicPublicId={PublicId}&MusicCommentPublicId={OtherPublicId}");
         await CheckAsync(api, handler, new MusicCommentCreateOperation(new() { MusicPublicId = Id, Text = "نظر آزمایشی", Timestamp = TimeSpan.FromSeconds(12.5) }), "/Musics/MusicCommentCreate", "POST",
             bodyCheck: body => Ensure(body.GetProperty("timestamp").GetString() == "00:00:12.5000000" && body.GetProperty("text").GetString() == "نظر آزمایشی", "Comment text/timestamp serialization failed."));
+        var page = await CheckAsync(api, handler, new MusicCommentsOperation(new()
+        {
+            MusicPublicId = Id, ParentMusicCommentPublicId = OtherId, After = Id, PageSize = 24, Sort = "dislikes"
+        }), "/Musics/MusicComments", "GET", $"?MusicPublicId={PublicId}&ParentMusicCommentPublicId={OtherPublicId}&After={PublicId}&PageSize=24&Sort=dislikes",
+            responseJson: $$$"""{"content":{"next":"{{{OtherPublicId}}}","musicComments":[{"publicId":"{{{PublicId}}}","text":"Reply","platform":"Windows","myVote":-1,"tags":[{"type":"music-video","publicId":"{{{OtherPublicId}}}","label":"Video","navigationPublicId":"{{{PublicId}}}"}]}]}}""");
+        Ensure(page.Next == OtherId && page.MusicComments.Single() is { Platform: "Windows", MyVote: -1, Tags: [{ NavigationPublicId: var trackId }] } &&
+            trackId == Id, "Discussion page and typed video link round trip.");
+        await CheckAsync(api, handler, new MusicCommentCreateOperation(new()
+        {
+            MusicPublicId = Id, Text = "Reply", ParentMusicCommentPublicId = OtherId, Tags = [new("person", Id)]
+        }), "/Musics/MusicCommentCreate", "POST",
+            bodyCheck: body => Ensure(body.GetProperty("parentMusicCommentPublicId").GetGuid() == OtherId &&
+                body.GetProperty("tags")[0].GetProperty("publicId").GetGuid() == Id, "Reply parent and typed tag serialization."));
+        var vote = await CheckAsync(api, handler, new MusicCommentVoteOperation(new()
+        {
+            MusicPublicId = Id, MusicCommentPublicId = OtherId, Vote = -1
+        }), "/Musics/MusicCommentVote", "POST",
+            bodyCheck: body => Ensure(body.GetProperty("vote").GetInt32() == -1, "Desired dislike serialization."),
+            responseJson: """{"content":{"likes":2,"dislikes":1,"myVote":-1}}""");
+        Ensure(vote is { Likes: 2, Dislikes: 1, MyVote: -1 }, "Vote counts round trip.");
+        await CheckAsync(api, handler, new MusicCommentTagSearchOperation(new() { Type = "client", Query = "Ali & Co" }),
+            "/Musics/MusicCommentTagSearch", "GET", "?Type=client&Query=Ali%20%26%20Co");
         await CheckAsync(api, handler, new MusicReactionsOperation(new() { MusicPublicId = Id }), "/Musics/MusicReactions", "GET", $"?MusicPublicId={PublicId}");
         await CheckAsync(api, handler, new MusicReactionTypesOperation(new()), "/Musics/MusicReactionTypes", "GET");
         await CheckAsync(api, handler, new MusicReactionOperation(new() { MusicPublicId = Id, MusicReactionTypePublicId = OtherId, Reacted = true }), "/Musics/MusicReaction", "POST");

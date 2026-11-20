@@ -49,6 +49,8 @@ public static class Endpoints
         public const string MusicAlbumMusics = $"{MUSICS_CONTROLER}/MusicAlbumMusics";
         public const string MusicContributorMusics = $"{MUSICS_CONTROLER}/MusicContributorMusics";
         public const string MusicComments = $"{MUSICS_CONTROLER}/MusicComments";
+        public const string MusicCommentVote = $"{MUSICS_CONTROLER}/MusicCommentVote";
+        public const string MusicCommentTagSearch = $"{MUSICS_CONTROLER}/MusicCommentTagSearch";
         public const string MusicCommentCreate = $"{MUSICS_CONTROLER}/MusicCommentCreate";
         public const string MusicContributors = $"{MUSICS_CONTROLER}/MusicContributors";
         public const string MusicView = $"{MUSICS_CONTROLER}/MusicView";

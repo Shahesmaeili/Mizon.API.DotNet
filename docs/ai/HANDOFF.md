@@ -1,5 +1,11 @@
 # SDK handoff
 
+## Track comment discussion — 2026-11-20
+
+The SDK exposes bounded discussion pages, replies, typed tags and votes in the
+existing music operations and source-generated JSON. See the
+[contract and checks](tasks/2026-11-20-music-comment-discussion.md).
+
 ## Main-window profile presence — 2026-11-11
 
 The existing MizonSocket now exposes SetWindowPresenceAsync, nullable WindowPresence
