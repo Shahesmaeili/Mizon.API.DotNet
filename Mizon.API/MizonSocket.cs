@@ -80,6 +80,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
         _subscriptions =
         [
             _hubConnection.On<ClientWindowPresenceResponse>("WindowPresenceChanged", ApplyWindowPresence),
+            _hubConnection.On<OnlineClientCount>("OnlineClientCountChanged", ApplyOnlineClientCount),
             _hubConnection.On<string, string?>("ReceiveNotification", static (_, _) => { }),
             _hubConnection.On<string>("UnregistrationConfirmed", static _ => { }),
             _hubConnection.On<string, Guid, int>("EntityViewersCountUpdated", (entityType, entityId, count) =>
@@ -126,9 +127,18 @@ public sealed partial class MizonSocket : IAsyncDisposable
 
                 if (_hubConnection.State == HubConnectionState.Disconnected)
                 {
-                    await _hubConnection.StartAsync(token).ConfigureAwait(false);
-                    await RestoreConnectionStateAsync(token).ConfigureAwait(false);
-                    started = true;
+                    NotifyConnectionState(HubConnectionState.Connecting);
+                    try
+                    {
+                        await _hubConnection.StartAsync(token).ConfigureAwait(false);
+                        await RestoreConnectionStateAsync(token).ConfigureAwait(false);
+                        started = true;
+                    }
+                    catch
+                    {
+                        NotifyConnectionState();
+                        throw;
+                    }
                 }
             }
             finally
@@ -162,6 +172,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
             _deviceRegistered = false;
             _tokenIdentity = null;
             await _hubConnection.StopAsync(cancellation.Token).ConfigureAwait(false);
+            ResetOnlineClientCount();
         }
         finally
         {
@@ -299,6 +310,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
 
     private Task OnClosed(Exception? exception)
     {
+        ResetOnlineClientCount();
         ResetWindowPresence(clearDesired: false);
         if (exception is not null)
             Trace.TraceWarning("Mizon socket closed: {0}", exception.Message);
@@ -308,6 +320,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
 
     private Task OnReconnecting(Exception? exception)
     {
+        ResetOnlineClientCount();
         ResetWindowPresence(clearDesired: false);
         if (exception is not null)
             Trace.TraceWarning("Mizon socket reconnecting: {0}", exception.Message);
@@ -355,13 +368,14 @@ public sealed partial class MizonSocket : IAsyncDisposable
         }
 
         await PublishLatestWindowPresenceAsync(cancellationToken).ConfigureAwait(false);
+        await ReadOnlineClientCountAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private void NotifyConnectionState()
+    private void NotifyConnectionState(HubConnectionState? state = null)
     {
         SignalConnectionChanged();
         if (Volatile.Read(ref _disposeRequested) == 0)
-            HubConnectionStateChanged?.Invoke(this, _hubConnection.State);
+            HubConnectionStateChanged?.Invoke(this, state ?? _hubConnection.State);
     }
 
     private void SignalConnectionChanged() => Interlocked.Exchange(ref _connectionChanged, NewConnectionSignal()).TrySetResult();
@@ -398,6 +412,8 @@ public sealed partial class MizonSocket : IAsyncDisposable
             MusicListenerUpdated = null;
             MusicListenerRemoved = null;
             WindowPresenceChanged = null;
+            OnlineClientsChanged = null;
+            ResetOnlineClientCount();
             await _hubConnection.DisposeAsync().ConfigureAwait(false);
         }
         finally
@@ -484,5 +500,6 @@ public sealed class MusicListenerPresence
 [JsonSerializable(typeof(DateTimeOffset))]
 [JsonSerializable(typeof(MusicListenerPresence))]
 [JsonSerializable(typeof(ClientWindowPresenceResponse))]
+[JsonSerializable(typeof(OnlineClientCount))]
 [JsonSerializable(typeof(List<MusicListenerPresence>))]
 internal partial class MizonSocketJsonContext : JsonSerializerContext;

@@ -43,6 +43,16 @@ internal static class SocketChecks
         Ensure(firstSession.Language == "fa-IR" && firstSession.NegotiatedLanguage == "fa-IR",
             "Negotiation and WebSocket upgrade use the application language.");
         Ensure(server.ConnectionCount == 1, "Concurrent starts establish one connection.");
+        Ensure(socket.OnlineClients is { Count: 2, Revision: 4 }, "Online count bootstraps after a live handshake.");
+        Ensure(await socket.GetOnlineFollowerCountAsync(token) == 1, "Follower count is a typed authenticated hub invocation.");
+        var onlineUpdate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        socket.OnlineClientsChanged += (_, _) =>
+        {
+            if (socket.OnlineClients is { Count: 5, Revision: 6 }) onlineUpdate.TrySetResult();
+        };
+        await firstSession.SendOnlineCountAsync(8, 3, token);
+        await firstSession.SendOnlineCountAsync(5, 6, token);
+        await onlineUpdate.Task.WaitAsync(token);
         await socket.RegisterDeviceAsync(token);
         var firstRegistration = await firstSession.Invocations.Reader.ReadAsync(token);
         Ensure(firstRegistration.Target == "RegisterDevice", "Device registration reaches the hub.");
@@ -98,7 +108,7 @@ internal static class SocketChecks
             "Reconnect restores the current membership before announcing readiness.");
 
         await socket.StopAsync(token);
-        Ensure(!socket.IsConnected, "Stop closes the connection.");
+        Ensure(!socket.IsConnected && socket.OnlineClients is null, "Stop closes the connection and clears live counts.");
         await socket.StartAsync(token);
         var thirdSession = await server.Sessions.Reader.ReadAsync(token);
         await socket.JoinEntityAsync("Music", otherMusicId, token);
@@ -283,6 +293,13 @@ internal static class SocketChecks
                                 continue;
                             var name = target.GetString()!;
                             var arguments = root.GetProperty("arguments");
+                            if (name is "GetOnlineClientCount" or "GetOnlineFollowerCount")
+                            {
+                                var countInvocationId = root.GetProperty("invocationId").GetRawText();
+                                var result = name == "GetOnlineFollowerCount" ? "1" : "{\"count\":2,\"revision\":4}";
+                                await SendAsync($"{{\"type\":3,\"invocationId\":{countInvocationId},\"result\":{result}}}", cancellationToken);
+                                continue;
+                            }
                             var invocation = name switch
                             {
                                 "JoinEntity" => new Invocation(name, arguments[1].GetGuid()),
@@ -343,6 +360,9 @@ internal static class SocketChecks
             public Task SendWindowPresenceAsync(ClientWindowPresenceResponse response, CancellationToken cancellationToken) =>
                 SendEventAsync("WindowPresenceChanged", JsonSerializer.Serialize(response,
                     WindowPresenceTestJsonContext.Default.ClientWindowPresenceResponse), cancellationToken);
+
+            public Task SendOnlineCountAsync(int count, long revision, CancellationToken token) =>
+                SendEventAsync("OnlineClientCountChanged", $"{{\"count\":{count},\"revision\":{revision}}}", token);
 
             public async Task ReleasePresenceAsync(CancellationToken cancellationToken)
             {
