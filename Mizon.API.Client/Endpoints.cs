@@ -70,6 +70,7 @@ public static class Endpoints
     public static class Medias
     {
         public const string Media = $"{MEDIAS_CONTROLER}/Media";
+        public const string PeerManifest = $"{MEDIAS_CONTROLER}/PeerManifest";
 
     }
 

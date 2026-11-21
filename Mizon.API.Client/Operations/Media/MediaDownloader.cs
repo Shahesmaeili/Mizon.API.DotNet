@@ -11,14 +11,20 @@ public sealed class MediaDownloader
     private static readonly char[] InvalidCacheNameChars = Path.GetInvalidFileNameChars();
     private readonly HttpClient _httpClient;
     private readonly string _cacheRoot;
+    private readonly IMediaPeerSource? _peers;
+    private readonly VerifiedMediaPieceCache? _pieceCache;
 
     public string CacheDirectory => _cacheRoot;
 
-    public MediaDownloader(HttpClient httpClient, string cacheRoot)
+    public MediaDownloader(HttpClient httpClient, string cacheRoot) : this(httpClient, cacheRoot, null) { }
+
+    public MediaDownloader(HttpClient httpClient, string cacheRoot, IMediaPeerSource? peers)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheRoot);
         _cacheRoot = Path.GetFullPath(cacheRoot);
+        _peers = peers;
+        _pieceCache = peers is null ? null : new VerifiedMediaPieceCache(_cacheRoot);
     }
 
     // Decide which key to use for caching. FileHash is content-based and better for dedup/resume across
@@ -207,6 +213,7 @@ public sealed class MediaDownloader
         // A cache hit still returns the final path to progressive consumers.
         if (IsCompleteFile(finalPath, info.FileSize))
         {
+            _peers?.ObserveCachedMedia(info);
             // File already fully downloaded and present in cache.
             // Yield a final DownloadChunk so callers receive the local path immediately.
             var fi = new FileInfo(finalPath);
@@ -216,6 +223,7 @@ public sealed class MediaDownloader
         }
 
 
+        var manifest = await GetVerifiedManifestAsync(info, token).ConfigureAwait(false);
         var chunkSize = info.ChunkSize > 0 ? info.ChunkSize : 81920;
         long? fileSize = info.FileSize > 0 ? info.FileSize : null;
         // Tiny profile images do not need an 80 KiB buffer in both FileStreams.
@@ -230,19 +238,33 @@ public sealed class MediaDownloader
         var downloaded = file.Length;
         if (fileSize.HasValue && downloaded > fileSize.Value) downloaded = 0;
         if (downloaded != fileSize) downloaded -= downloaded % chunkSize;
+        if (manifest is not null && downloaded > 0)
+            downloaded = await FindVerifiedPrefixAsync(partialPath, manifest, downloaded, token).ConfigureAwait(false);
         file.SetLength(downloaded);
         file.Position = downloaded;
         localSource?.Seek(downloaded, SeekOrigin.Begin);
 
         var chunkIndex = checked((int)(downloaded / chunkSize));
-        var scratch = ArrayPool<byte>.Shared.Rent(Math.Min(chunkSize, 81920));
+        var scratch = ArrayPool<byte>.Shared.Rent(manifest?.PieceSize ?? Math.Min(chunkSize, 81920));
         HttpSource? remoteSource = null;
+        using var lookahead = _peers?.EnableLookahead == true && manifest is { PieceCount: >= 8 }
+            ? CancellationTokenSource.CreateLinkedTokenSource(token) : null;
+        Task ahead = Task.CompletedTask;
+        var aheadIndex = -1;
         try
         {
             while (!fileSize.HasValue || downloaded < fileSize.Value)
             {
                 token.ThrowIfCancellationRequested();
                 if (session is not null) await session.WaitWhilePausedAsync(token).ConfigureAwait(false);
+                Task pending = Task.CompletedTask;
+                if (lookahead is { IsCancellationRequested: false } && manifest is not null)
+                {
+                    if (aheadIndex == chunkIndex) pending = ahead;
+                    aheadIndex = chunkIndex + 1;
+                    ahead = aheadIndex < manifest.PieceCount
+                        ? PrepareSparsePieceAsync(manifest, storageUri, aheadIndex, lookahead.Token) : Task.CompletedTask;
+                }
                 var attempt = 0;
                 byte[] data;
                 int count;
@@ -259,6 +281,46 @@ public sealed class MediaDownloader
                     try
                     {
                         var expected = (int)Math.Min(chunkSize, fileSize.HasValue ? fileSize.Value - downloaded : chunkSize);
+                        if (manifest is not null)
+                        {
+                            var piece = scratch.AsMemory(0, expected);
+                            await pending.ConfigureAwait(false);
+                            var fromCache = remoteSource is null && _pieceCache is not null
+                                && await _pieceCache.TryReadAsync(manifest, chunkIndex, piece, token).ConfigureAwait(false);
+                            var fromPeer = !fromCache && remoteSource is null
+                                && await TryReadPeerAsync(manifest, chunkIndex, piece, token).ConfigureAwait(false);
+                            if (!fromCache && !fromPeer)
+                            {
+                                if (localSource is not null)
+                                {
+                                    localSource.Position = downloaded;
+                                    await localSource.ReadExactlyAsync(piece, readToken).ConfigureAwait(false);
+                                }
+                                else
+                                {
+                                    remoteSource ??= await OpenHttpSourceAsync(storageUri, downloaded, expected, fileSize, scratch, readToken).ConfigureAwait(false);
+                                    if (remoteSource.Continuous) lookahead?.Cancel();
+                                    await remoteSource.Stream.ReadExactlyAsync(piece, readToken).ConfigureAwait(false);
+                                }
+                                if (!manifest.Verify(chunkIndex, piece.Span))
+                                    throw new InvalidDataException("The origin media piece does not match its trusted manifest.");
+                            }
+                            await file.WriteAsync(piece, readToken).ConfigureAwait(false);
+                            await file.FlushAsync(readToken).ConfigureAwait(false);
+                            if (fromCache) _pieceCache?.Discard(manifest, chunkIndex);
+                            count = expected;
+                            finished = downloaded + count == manifest.Length;
+                            data = includeData ? piece.ToArray() : Array.Empty<byte>();
+                            var elapsed = Stopwatch.GetElapsedTime(started).TotalSeconds;
+                            speed = elapsed > 0 ? count / elapsed : 0;
+                            if (remoteSource is { Continuous: false })
+                            {
+                                await remoteSource.DisposeAsync().ConfigureAwait(false);
+                                remoteSource = null;
+                            }
+                            break;
+                        }
+
                         Stream source;
                         if (localSource is not null)
                             source = localSource;
@@ -336,12 +398,125 @@ public sealed class MediaDownloader
         }
         finally
         {
+            lookahead?.Cancel();
+            await ahead.ConfigureAwait(false);
             if (remoteSource is not null) await remoteSource.DisposeAsync().ConfigureAwait(false);
             ArrayPool<byte>.Shared.Return(scratch);
         }
     }
 
-    private async ValueTask<HttpSource> OpenHttpSourceAsync(Uri uri, long start, int count, long? fileSize, byte[] scratch, CancellationToken token)
+    private async ValueTask<VerifiedMediaManifest?> GetVerifiedManifestAsync(Responses.Media.MediaResponse media,
+        CancellationToken cancellationToken)
+    {
+        if (_peers is null || media.FileHash is not { Length: 64 } || media.FileSize <= 0)
+            return null;
+        using var lookup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        lookup.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            var manifest = await _peers.GetManifestAsync(media, lookup.Token).ConfigureAwait(false);
+            return manifest?.Matches(media) == true ? manifest : null;
+        }
+        catch (Exception error) when (IsPeerUnavailable(error, cancellationToken)) { return null; }
+    }
+
+    private async ValueTask<bool> TryReadPeerAsync(VerifiedMediaManifest manifest, int index, Memory<byte> piece,
+        CancellationToken cancellationToken)
+    {
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        attempt.CancelAfter(TimeSpan.FromMilliseconds(1500));
+        try
+        {
+            return await _peers!.TryReadPieceAsync(manifest, index, piece, attempt.Token).ConfigureAwait(false)
+                && manifest.Verify(index, piece.Span);
+        }
+        catch (Exception error) when (IsPeerUnavailable(error, cancellationToken)) { return false; }
+    }
+
+    private static bool IsPeerUnavailable(Exception error, CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested && error is (IOException or HttpRequestException or TimeoutException
+            or System.Net.Sockets.SocketException or System.Security.Authentication.AuthenticationException or OperationCanceledException);
+
+    private static async ValueTask<long> FindVerifiedPrefixAsync(string path, VerifiedMediaManifest manifest,
+        long availableLength, CancellationToken token)
+    {
+        await using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+            4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var buffer = ArrayPool<byte>.Shared.Rent(manifest.PieceSize);
+        try
+        {
+            var verified = 0L;
+            for (var index = 0; verified < availableLength; index++)
+            {
+                var length = manifest.GetPieceLength(index);
+                if (length == 0 || length > availableLength - verified) break;
+                await file.ReadExactlyAsync(buffer.AsMemory(0, length), token).ConfigureAwait(false);
+                if (!manifest.Verify(index, buffer.AsSpan(0, length))) break;
+                verified += length;
+            }
+            return verified;
+        }
+        finally { ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    /// <summary>Reads an exact, verified piece from a cache path whose metadata came from the origin.</summary>
+    public async ValueTask<bool> TryReadCachedPieceAsync(Responses.Media.MediaResponse media, VerifiedMediaManifest manifest,
+        int index, Memory<byte> destination, CancellationToken cancellationToken = default)
+    {
+        var size = manifest.GetPieceLength(index);
+        if (size == 0 || destination.Length != size || !manifest.Matches(media)) return false;
+        if (_pieceCache is not null && await _pieceCache.TryReadAsync(manifest, index, destination, cancellationToken).ConfigureAwait(false))
+            return true;
+        var path = GetCachedFilePath(media);
+        var sourcePath = File.Exists(path) ? path : GetPartialFilePath(path);
+        try
+        {
+            await using var file = new FileStream(sourcePath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            file.Position = checked((long)index * manifest.PieceSize);
+            if (file.Length - file.Position < size) return false;
+            await file.ReadExactlyAsync(destination, cancellationToken).ConfigureAwait(false);
+            return manifest.Verify(index, destination.Span);
+        }
+        catch (IOException) when (!cancellationToken.IsCancellationRequested) { return false; }
+    }
+
+    private async Task PrepareSparsePieceAsync(VerifiedMediaManifest manifest, Uri origin, int index, CancellationToken lifetime)
+    {
+        if (_pieceCache is null) return;
+        var size = manifest.GetPieceLength(index);
+        var scratch = ArrayPool<byte>.Shared.Rent(size);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+        timeout.CancelAfter(TimeSpan.FromSeconds(3));
+        try
+        {
+            var piece = scratch.AsMemory(0, size);
+            if (await _pieceCache.TryReadAsync(manifest, index, piece, timeout.Token).ConfigureAwait(false)) return;
+            if (!await TryReadPeerAsync(manifest, index, piece, timeout.Token).ConfigureAwait(false))
+            {
+                var offset = (long)index * manifest.PieceSize;
+                if (origin.IsFile)
+                {
+                    await using var file = new FileStream(origin.LocalPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        4096, FileOptions.Asynchronous | FileOptions.RandomAccess);
+                    file.Position = offset;
+                    await file.ReadExactlyAsync(piece, timeout.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    await using var source = await OpenHttpSourceAsync(origin, offset, size, manifest.Length,
+                        scratch, timeout.Token, requireRange: true).ConfigureAwait(false);
+                    await source.Stream.ReadExactlyAsync(piece, timeout.Token).ConfigureAwait(false);
+                }
+            }
+            await _pieceCache.StoreAsync(manifest, index, piece, timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception error) when (IsPeerUnavailable(error, CancellationToken.None) || error is UnauthorizedAccessException or InvalidDataException) { }
+        finally { ArrayPool<byte>.Shared.Return(scratch); }
+    }
+
+    private async ValueTask<HttpSource> OpenHttpSourceAsync(Uri uri, long start, int count, long? fileSize, byte[] scratch,
+        CancellationToken token, bool requireRange = false)
     {
         using var request = new HttpRequestMessage(global::System.Net.Http.HttpMethod.Get, uri);
         if (fileSize.HasValue)
@@ -351,6 +526,7 @@ public sealed class MediaDownloader
         {
             response.EnsureSuccessStatusCode();
             var continuous = response.StatusCode == HttpStatusCode.OK;
+            if (requireRange && continuous) throw new InvalidDataException("The media origin does not support sparse range requests.");
             long? responseSize;
             if (continuous)
                 responseSize = response.Content.Headers.ContentLength;

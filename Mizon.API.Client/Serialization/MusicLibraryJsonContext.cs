@@ -17,5 +17,6 @@ namespace Mizon.API.Client.Serialization;
 [JsonSerializable(typeof(BaseApiResponse<MusicPlaylistMembershipResponse>))]
 [JsonSerializable(typeof(BaseApiRequest<MediaRequest>))]
 [JsonSerializable(typeof(BaseApiResponse<MediaResponse>))]
+[JsonSerializable(typeof(BaseApiResponse<PeerMediaManifestResponse>))]
 internal partial class MusicLibraryJsonContext : JsonSerializerContext;
 

@@ -51,6 +51,11 @@ reduction. No visual or real-server UI checks were run by this SDK task.
 
 The executable diagnostic suite and commands are in [PROJECT.md](PROJECT.md). The coordinating publication task should record its own build/test results separately. Do not infer that every current uncommitted change or every other platform client is verified by the earlier performance report.
 
+## Verified peer-assisted media — 2026-11-21
+
+The optional peer source adds verified media pieces without changing the origin
+fallback for ordinary callers. See [wire contract and checks](tasks/2026-11-21-verified-peer-media.md).
+
 ## Next assistant checklist
 
 1. Read `AGENTS.md`, the collaboration guide, this handoff and the affected source; check the actual branch/worktree status and incoming changes.

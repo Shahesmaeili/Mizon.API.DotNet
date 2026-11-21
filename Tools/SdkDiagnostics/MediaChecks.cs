@@ -3,7 +3,7 @@ using System.Net.Http.Headers;
 using Mizon.API.Client.Operations.Media;
 using Mizon.API.Client.Responses.Media;
 
-internal static class MediaChecks
+internal static partial class MediaChecks
 {
     public static async Task RunAsync()
     {
@@ -171,6 +171,7 @@ internal static class MediaChecks
         var completeAllocation = GC.GetTotalAllocatedBytes(precise: true) - beforeAllocated;
         Check(completeAllocation < 1024 * 1024, "Complete-file download uses bounded memory instead of a whole-media byte array");
         Console.WriteLine($"Media completion helper allocation for 8 MiB/one chunk: {completeAllocation:N0} bytes.");
+        await VerifyPeerPiecesAsync(root, data, remoteUri);
         Console.WriteLine($"Media diagnostics artifacts: {root}");
     }
 

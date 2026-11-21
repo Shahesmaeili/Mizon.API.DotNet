@@ -63,6 +63,7 @@ internal static class OperationChecks
             "/Persons/PersonFollow", "POST", bodyCheck: body =>
                 Ensure(body.GetProperty("personPublicId").GetGuid() == Id && !body.GetProperty("following").GetBoolean(), "Explicit unfollow body."));
         await CheckAsync(api, handler, new MediaOperation(new() { MediaPublicId = Id }), "/Medias/Media", "GET", $"?MediaPublicId={PublicId}");
+        await CheckAsync(api, handler, new PeerMediaManifestOperation(new() { MediaPublicId = Id }), "/Medias/PeerManifest", "GET", $"?MediaPublicId={PublicId}");
 
         await CheckAsync(api, handler, new MusicOperation(new() { MusicPublicId = Id }), "/Musics/Music", "GET", $"?MusicPublicId={PublicId}");
         await CheckAsync(api, handler, new MusicFileOperation(new() { MusicPublicId = Id }), "/Musics/MusicFile", "GET", $"?MusicPublicId={PublicId}");
