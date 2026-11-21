@@ -14,8 +14,9 @@ keep the existing no-peer downloader path.
 ## LAN wire format
 
 The platform discovery record advertises `media=1` and the server certificate
-DER SHA-256 as `cert` (hex) on the normal Mizon Bonjour TCP endpoint. The client
-connects over TLS pinned to that leaf. A single request is 44 bytes. Bytes
+DER SHA-256 as `cert` (hex) on the Mizon Bonjour TCP announcement. If the TXT
+record includes `media-port`, use that decimal TCP port for TLS. Existing
+announcements without it use the DNS-SD SRV port. Pin TLS to the announced leaf. A single request is 44 bytes. Bytes
 0–3 are ASCII `MZP1`. Bytes 4–35 are the binary SHA-256 of the full asset.
 Bytes 36–39 and 40–43 are big-endian 32-bit piece size and zero-based piece
 index. The response starts with a big-endian 32-bit length (0 if unavailable)
