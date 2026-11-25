@@ -21,6 +21,11 @@ public static class Endpoints
         public const string ME = $"{CLIENTS_CONTROLER}/Me";
         public const string ClientMoodTypes = $"{CLIENTS_CONTROLER}/ClientMoodTypes";
         public const string ClientMood = $"{CLIENTS_CONTROLER}/ClientMood";
+        public const string Sessions = $"{CLIENTS_CONTROLER}/Sessions";
+        public const string TerminateSession = $"{CLIENTS_CONTROLER}/TerminateSession";
+        public const string TerminateOtherSessions = $"{CLIENTS_CONTROLER}/TerminateOtherSessions";
+        public const string UpdateSessionInactivity = $"{CLIENTS_CONTROLER}/UpdateSessionInactivity";
+        public const string ConfirmSession = $"{CLIENTS_CONTROLER}/ConfirmSession";
         public const string ClientProfile = $"{CLIENTS_CONTROLER}/ClientProfile";
         public const string FollowingActivities = $"{CLIENTS_CONTROLER}/FollowingActivities";
     }

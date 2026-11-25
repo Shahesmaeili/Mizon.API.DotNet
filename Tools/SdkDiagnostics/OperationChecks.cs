@@ -149,7 +149,40 @@ internal static class OperationChecks
             count++;
         }
         Ensure(count == 2, "Streaming search lost a result.");
+        await CheckDeviceSessionsAsync(api, handler);
         Console.WriteLine("PASS: all checked built-in operations (including artist profile, tracks and follow); GET routing, auth, request/response metadata, nested JSON, logout repeat and streamed search with reflection disabled.");
+    }
+
+    private static async Task CheckDeviceSessionsAsync(MizonApi api, OperationHandler handler)
+    {
+        var operation = new ClientSessionsOperation(new());
+        var content = await CheckAsync(api, handler, operation, "/Clients/Sessions", "GET",
+            responseJson: $$$"""{"content":{"inactivityDays":90,"sessions":[{"sessionPublicId":"{{{PublicId}}}","platform":"Windows","appVersion":"1.0","osVersion":"11","deviceName":"Fixture","deviceModel":"Desktop","createdAtUtc":"2026-11-22T12:00:00Z","lastActiveAtUtc":"2026-11-23T18:30:00Z","isCurrent":true,"isOnline":true,"isUnconfirmed":true}]}}""");
+        Ensure(content is { InactivityDays: 90, Sessions: [{ IsCurrent: true, IsOnline: true, IsUnconfirmed: true }] },
+            "Generated device session DTO lost status.");
+        await CheckAsync(api, handler, operation, "/Clients/Sessions", "GET",
+            responseJson: """{"content":{"inactivityDays":0,"sessions":[]}}""");
+        var confirm = await CheckAsync(api, handler, new ConfirmSessionOperation(new() { SessionPublicId = Id }),
+            "/Clients/ConfirmSession", "POST", responseJson: """{"content":{"confirmed":true}}""",
+            bodyCheck: body => Ensure(body.GetProperty("sessionPublicId").GetGuid() == Id, "Incorrect confirmation target."));
+        Ensure(confirm.Confirmed, "Confirmation result was lost.");
+
+        SessionRevokedEventArgs? notice = null;
+        api.SessionRevoked += (_, signal) => notice = signal;
+        handler.Expect("/Clients/Sessions", "GET", "", authorized: true, "");
+        handler.Status = HttpStatusCode.Unauthorized;
+        await api.SendRequestAsync(operation);
+        Ensure(notice is null, "Ordinary 401 triggered a revocation.");
+        handler.Revoked = true;
+        handler.BeforeResponse = () => api.SetToken("replacement-token");
+        await api.SendRequestAsync(operation);
+        Ensure(notice is null, "Response from a previous sign-in revoked the replacement session.");
+        handler.BeforeResponse = null;
+        await api.SendRequestAsync(operation);
+        Ensure(notice is not null && api.IsCurrentSession(notice), "Current signed-in session did not receive the revocation marker.");
+        api.SetToken("another-token");
+        Ensure(!api.IsCurrentSession(notice!), "Queued notice remained current after a token change.");
+        Console.WriteLine("PASS: device sessions use generated JSON without caching. The 401 marker applies only to the request's sign-in.");
     }
 
     private static async Task<TResponse> CheckAsync<TRequest, TResponse>(MizonApi api, OperationHandler handler,
@@ -179,6 +212,9 @@ internal static class OperationChecks
         private bool _authorized;
         private Action<JsonElement>? _bodyCheck;
         public int CallCount { get; private set; }
+        public HttpStatusCode Status { get; set; } = HttpStatusCode.OK;
+        public bool Revoked { get; set; }
+        public Action? BeforeResponse { get; set; }
 
         public void Expect(string path, string method, string query, bool authorized, string response, Action<JsonElement>? bodyCheck = null)
             => (_path, _method, _query, _authorized, _response, _bodyCheck) = (path, method, query, authorized, response, bodyCheck);
@@ -202,10 +238,13 @@ internal static class OperationChecks
                 _bodyCheck?.Invoke(content);
             }
 
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            BeforeResponse?.Invoke();
+            var response = new HttpResponseMessage(Status)
             {
                 Content = new StringContent(_response, Encoding.UTF8, _path == "/Search/Global" ? "application/x-ndjson" : "application/json")
             };
+            if (Revoked) response.Headers.Add("Mizon-Session-Revoked", "1");
+            return response;
         }
     }
 }

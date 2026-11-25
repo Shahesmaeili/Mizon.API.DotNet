@@ -25,6 +25,9 @@ public sealed partial class MizonSocket : IAsyncDisposable
     private Task? _disposeTask;
 
     public event EventHandler<HubConnectionState>? HubConnectionStateChanged;
+    public event EventHandler? SessionsChanged;
+    public event EventHandler<SessionRevokedEventArgs>? SessionRevoked;
+    public event EventHandler? NewSessionUnconfirmed;
     public event EventHandler<EntityViewersCountChangedEventArgs>? EntityViewersCountChanged;
     public event EventHandler<MusicListenersSnapshotEventArgs>? MusicListenersSnapshotReceived;
     public event EventHandler<MusicListenerUpdatedEventArgs>? MusicListenerUpdated;
@@ -81,6 +84,9 @@ public sealed partial class MizonSocket : IAsyncDisposable
         [
             _hubConnection.On<ClientWindowPresenceResponse>("WindowPresenceChanged", ApplyWindowPresence),
             _hubConnection.On<ClientAccountPresenceResponse>("AccountPresenceChanged", ApplyAccountPresenceEvent),
+            _hubConnection.On("SessionsChanged", () => SessionsChanged?.Invoke(this, EventArgs.Empty)),
+            _hubConnection.On("SessionRevoked", ApplySessionRevocation),
+            _hubConnection.On("NewSessionUnconfirmed", () => NewSessionUnconfirmed?.Invoke(this, EventArgs.Empty)),
             _hubConnection.On<OnlineClientCount>("OnlineClientCountChanged", ApplyOnlineClientCount),
             _hubConnection.On<string, string?>("ReceiveNotification", static (_, _) => { }),
             _hubConnection.On<string>("UnregistrationConfirmed", static _ => { }),
@@ -93,6 +99,20 @@ public sealed partial class MizonSocket : IAsyncDisposable
             _hubConnection.On<Guid, Guid>("MusicListenerRemoved", (musicPublicId, clientPublicId) =>
                 MusicListenerRemoved?.Invoke(this, new(musicPublicId, clientPublicId)))
         ];
+    }
+
+    private void ApplySessionRevocation()
+    {
+        long generation;
+        lock (_windowPresenceGate)
+        {
+            if (_windowPresenceConnectionId is null || _windowPresenceConnectionId != _hubConnection.ConnectionId)
+                return;
+            generation = _accountPresenceConnectionGeneration;
+        }
+        var revoked = new SessionRevokedEventArgs(generation);
+        if (_mizonApi.IsCurrentSession(revoked))
+            SessionRevoked?.Invoke(this, revoked);
     }
 
     private sealed class LanguageHeaderHandler(HttpMessageHandler inner, MizonApi api) : DelegatingHandler(inner)
@@ -419,6 +439,9 @@ public sealed partial class MizonSocket : IAsyncDisposable
             MusicListenerRemoved = null;
             WindowPresenceChanged = null;
             AccountPresenceChanged = null;
+            SessionsChanged = null;
+            SessionRevoked = null;
+            NewSessionUnconfirmed = null;
             OnlineClientsChanged = null;
             ResetOnlineClientCount();
             await _hubConnection.DisposeAsync().ConfigureAwait(false);

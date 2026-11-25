@@ -13,6 +13,8 @@ namespace Mizon.API;
 
 public sealed class MizonApi : IDisposable
 {
+    public event EventHandler<SessionRevokedEventArgs>? SessionRevoked;
+
     private static long _nextCacheScope;
     private readonly HttpClient _httpClient;
     private readonly IMemoryCache _memoryCache;
@@ -66,6 +68,12 @@ public sealed class MizonApi : IDisposable
         return (session.Token, session.CacheScope);
     }
 
+    public bool IsCurrentSession(SessionRevokedEventArgs revoked)
+    {
+        var session = Volatile.Read(ref _session);
+        return session.Token is not null && session.CacheScope == revoked.Generation;
+    }
+
     internal string? GetRequestLanguage() => _languageProvider?.Invoke();
 
     public void ClearToken() => Interlocked.Exchange(ref _session,
@@ -90,10 +98,12 @@ public sealed class MizonApi : IDisposable
             throw new NotSupportedException("Only GET is supported for streamed API requests.");
 
         var query = mizonApiRequest.RequestQueryString ?? BuildQueryString(mizonApiRequest.BaseApiRequest, mizonApiRequest.RequestJsonTypeInfo);
+        var session = Volatile.Read(ref _session);
         using var request = CreateRequest(System.Net.Http.HttpMethod.Get, mizonApiRequest.Endpoint + query,
-            mizonApiRequest.NeedAuthorized, Volatile.Read(ref _session), Volatile.Read(ref _device), GetRequestLanguage());
+            mizonApiRequest.NeedAuthorized, session, Volatile.Read(ref _device), GetRequestLanguage());
         using var requestLifetime = CreateRequestLifetime(cancellationToken, mizonApiRequest.CallTimeoutDuration);
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestLifetime.Token).ConfigureAwait(false);
+        NotifySessionRevocation(response, mizonApiRequest.NeedAuthorized, session);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(requestLifetime.Token).ConfigureAwait(false);
         var typeInfo = ResolveTypeInfo(mizonApiRequest.ResponseJsonTypeInfo);
@@ -146,7 +156,10 @@ public sealed class MizonApi : IDisposable
             using var requestLifetime = CreateRequestLifetime(callerToken, mizonApiRequest.CallTimeoutDuration);
             using var httpResponse = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, requestLifetime.Token).ConfigureAwait(false);
             if (httpResponse.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                NotifySessionRevocation(httpResponse, mizonApiRequest.NeedAuthorized, session);
                 return Failure<Response>(401, "Unauthorized", "The server rejected the access token.");
+            }
 
             await using var stream = await httpResponse.Content.ReadAsStreamAsync(requestLifetime.Token).ConfigureAwait(false);
             var response = await JsonSerializer.DeserializeAsync(stream, ResolveTypeInfo(mizonApiRequest.ResponseJsonTypeInfo), requestLifetime.Token).ConfigureAwait(false)
@@ -203,6 +216,14 @@ public sealed class MizonApi : IDisposable
         {
             return Failure<Response>(108, "Unexpected Error", "An unexpected error occurred. " + ex.Message);
         }
+    }
+
+    private void NotifySessionRevocation(HttpResponseMessage response, bool authorized, SessionState session)
+    {
+        if (authorized && response.StatusCode == HttpStatusCode.Unauthorized &&
+            ReferenceEquals(session, Volatile.Read(ref _session)) &&
+            response.Headers.TryGetValues("Mizon-Session-Revoked", out var values) && values.Contains("1", StringComparer.Ordinal))
+            SessionRevoked?.Invoke(this, new(session.CacheScope));
     }
 
     [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = "The legacy untrimmed-JIT fallback is guarded by JsonSerializer.IsReflectionEnabledByDefault. Trimmed/AOT consumers use source-generated metadata; the SDK supplies it for every operation.")]
@@ -313,6 +334,7 @@ public sealed class MizonApi : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         ClearToken();
+        SessionRevoked = null;
         try { _lifetimeCancellation.Cancel(); }
         finally
         {
@@ -325,4 +347,10 @@ public sealed class MizonApi : IDisposable
     private sealed record DeviceInformation(string OsVersion, string Identifier, string Model, string Name, string Username, string PlatformVersion, long CacheScope);
     private sealed record CachedResponse<T>(T? Content) where T : IApiResponse;
     private readonly record struct ResponseCacheKey(long Session, long Device, string? Language, string Endpoint, HttpMethod Method, bool Authorized, Type ResponseType, string BodyHash);
+}
+
+public sealed class SessionRevokedEventArgs : EventArgs
+{
+    internal SessionRevokedEventArgs(long generation) => Generation = generation;
+    internal long Generation { get; }
 }
