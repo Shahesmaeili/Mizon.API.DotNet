@@ -76,9 +76,12 @@ public sealed partial class MizonSocket
 
     private Task<string?> GetWindowPresenceTransportTokenAsync()
     {
-        var token = _mizonApi.GetToken();
+        var (token, generation) = _mizonApi.ReadAuthentication();
         lock (_windowPresenceGate)
+        {
             _windowPresenceTransportClientId = TryGetClientPublicId(token);
+            _accountPresenceTransportGeneration = generation;
+        }
         return Task.FromResult(token);
     }
 
@@ -90,6 +93,7 @@ public sealed partial class MizonSocket
                 return;
             _windowPresenceConnectionId = _hubConnection.ConnectionId;
             _windowPresenceConnectedClientId = _windowPresenceTransportClientId;
+            _accountPresenceConnectionGeneration = _accountPresenceTransportGeneration;
             _windowPresence = null;
             if (_windowPresenceIntent?.ClientPublicId != _windowPresenceConnectedClientId)
                 _windowPresenceIntent = null;

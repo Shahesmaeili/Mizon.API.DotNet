@@ -60,6 +60,12 @@ public sealed class MizonApi : IDisposable
 
     public string? GetToken() => Volatile.Read(ref _session).Token;
 
+    internal (string? Token, long Generation) ReadAuthentication()
+    {
+        var session = Volatile.Read(ref _session);
+        return (session.Token, session.CacheScope);
+    }
+
     internal string? GetRequestLanguage() => _languageProvider?.Invoke();
 
     public void ClearToken() => Interlocked.Exchange(ref _session,

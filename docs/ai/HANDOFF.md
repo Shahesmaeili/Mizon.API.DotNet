@@ -1,5 +1,11 @@
 # SDK handoff
 
+## Account presence watch
+
+The .NET socket can read and watch the authenticated account’s combined active-window state through
+`WatchAccountPresenceAsync`, `AccountPresence` and `AccountPresenceChanged`.
+See the [contract and checks](tasks/2026-11-25-dotnet-account-presence.md).
+
 ## Track comment discussion — 2026-11-20
 
 The SDK exposes bounded discussion pages, replies, typed tags and votes in the

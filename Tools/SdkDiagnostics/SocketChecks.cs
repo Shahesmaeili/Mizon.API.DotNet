@@ -251,6 +251,8 @@ internal static class SocketChecks
             public volatile bool HoldNextJoin;
             public volatile bool HoldNextPresence;
             private (string Id, string Json)? _heldPresence;
+            public volatile bool HoldNextAccountPresence;
+            private (string Id, string Json)? _heldAccountPresence;
             public TaskCompletionSource ReleaseHandshake { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public string ConnectionId => connectionId;
             public string? Language { get; init; }
@@ -308,6 +310,21 @@ internal static class SocketChecks
                                 "SetWindowPresence" => new Invocation(name, IsActive: arguments[0].GetBoolean(), Revision: arguments[1].GetInt64()),
                                 _ => new Invocation(name)
                             };
+                            if (name == "WatchAccountPresence")
+                            {
+                                var watchInvocationId = root.GetProperty("invocationId").GetRawText();
+                                var response = new ClientAccountPresenceResponse { ClientPublicId = clientId, Revision = 1 };
+                                var json = JsonSerializer.Serialize(response, AccountPresenceTestJsonContext.Default.ClientAccountPresenceResponse);
+                                if (HoldNextAccountPresence)
+                                {
+                                    HoldNextAccountPresence = false;
+                                    _heldAccountPresence = (watchInvocationId, json);
+                                }
+                                else
+                                    await SendResultAsync(watchInvocationId, json, cancellationToken);
+                                await Invocations.Writer.WriteAsync(invocation, cancellationToken);
+                                continue;
+                            }
                             await Invocations.Writer.WriteAsync(invocation, cancellationToken);
                             if (name == "SetWindowPresence")
                             {
@@ -360,6 +377,20 @@ internal static class SocketChecks
             public Task SendWindowPresenceAsync(ClientWindowPresenceResponse response, CancellationToken cancellationToken) =>
                 SendEventAsync("WindowPresenceChanged", JsonSerializer.Serialize(response,
                     WindowPresenceTestJsonContext.Default.ClientWindowPresenceResponse), cancellationToken);
+
+            public Task SendAccountPresenceAsync(ClientAccountPresenceResponse response, CancellationToken cancellationToken) =>
+                SendEventAsync("AccountPresenceChanged", JsonSerializer.Serialize(response,
+                    AccountPresenceTestJsonContext.Default.ClientAccountPresenceResponse), cancellationToken);
+
+            public async Task ReleaseAccountPresenceAsync(CancellationToken cancellationToken)
+            {
+                var held = _heldAccountPresence ?? throw new InvalidOperationException("No account presence invocation is held.");
+                _heldAccountPresence = null;
+                await SendResultAsync(held.Id, held.Json, cancellationToken);
+            }
+
+            private Task SendResultAsync(string id, string json, CancellationToken cancellationToken) =>
+                SendAsync($"{{\"type\":3,\"invocationId\":{id},\"result\":{json}}}", cancellationToken);
 
             public Task SendOnlineCountAsync(int count, long revision, CancellationToken token) =>
                 SendEventAsync("OnlineClientCountChanged", $"{{\"count\":{count},\"revision\":{revision}}}", token);

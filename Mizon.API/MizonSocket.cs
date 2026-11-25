@@ -80,6 +80,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
         _subscriptions =
         [
             _hubConnection.On<ClientWindowPresenceResponse>("WindowPresenceChanged", ApplyWindowPresence),
+            _hubConnection.On<ClientAccountPresenceResponse>("AccountPresenceChanged", ApplyAccountPresenceEvent),
             _hubConnection.On<OnlineClientCount>("OnlineClientCountChanged", ApplyOnlineClientCount),
             _hubConnection.On<string, string?>("ReceiveNotification", static (_, _) => { }),
             _hubConnection.On<string>("UnregistrationConfirmed", static _ => { }),
@@ -163,6 +164,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
         cancellationToken.ThrowIfCancellationRequested();
         Interlocked.Increment(ref _stopVersion);
         ResetWindowPresence(clearDesired: true);
+        ResetAccountPresence();
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeToken);
         await _operationLock.WaitAsync(cancellation.Token).ConfigureAwait(false);
         try
@@ -178,6 +180,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
         {
             // Focus callbacks queued while StopAsync was waiting must not survive into the next login.
             ResetWindowPresence(clearDesired: true);
+            ResetAccountPresence();
             _operationLock.Release();
             SignalConnectionChanged();
         }
@@ -312,6 +315,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
     {
         ResetOnlineClientCount();
         ResetWindowPresence(clearDesired: false);
+        ResetAccountPresence();
         if (exception is not null)
             Trace.TraceWarning("Mizon socket closed: {0}", exception.Message);
         NotifyConnectionState();
@@ -322,6 +326,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
     {
         ResetOnlineClientCount();
         ResetWindowPresence(clearDesired: false);
+        ResetAccountPresence();
         if (exception is not null)
             Trace.TraceWarning("Mizon socket reconnecting: {0}", exception.Message);
         NotifyConnectionState();
@@ -392,6 +397,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
     {
         Interlocked.Exchange(ref _disposeRequested, 1);
         ResetWindowPresence(clearDesired: true);
+        ResetAccountPresence();
         await _lifetimeCancellation.CancelAsync().ConfigureAwait(false);
         SignalConnectionChanged();
         await _operationLock.WaitAsync().ConfigureAwait(false);
@@ -412,6 +418,7 @@ public sealed partial class MizonSocket : IAsyncDisposable
             MusicListenerUpdated = null;
             MusicListenerRemoved = null;
             WindowPresenceChanged = null;
+            AccountPresenceChanged = null;
             OnlineClientsChanged = null;
             ResetOnlineClientCount();
             await _hubConnection.DisposeAsync().ConfigureAwait(false);
@@ -500,6 +507,7 @@ public sealed class MusicListenerPresence
 [JsonSerializable(typeof(DateTimeOffset))]
 [JsonSerializable(typeof(MusicListenerPresence))]
 [JsonSerializable(typeof(ClientWindowPresenceResponse))]
+[JsonSerializable(typeof(ClientAccountPresenceResponse))]
 [JsonSerializable(typeof(OnlineClientCount))]
 [JsonSerializable(typeof(List<MusicListenerPresence>))]
 internal partial class MizonSocketJsonContext : JsonSerializerContext;
