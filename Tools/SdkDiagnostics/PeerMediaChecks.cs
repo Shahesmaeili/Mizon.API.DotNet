@@ -56,6 +56,35 @@ internal static partial class MediaChecks
             "Only valid pieces are served from a partial cache");
         Check((await File.ReadAllBytesAsync(await available.DownloadToCacheAsync(info, origin))).SequenceEqual(data)
             && resumeHandler.Requests == 9, "A corrupt resumed prefix is trimmed at the last verified piece");
+        await VerifyPriorityWithoutRangesAsync(root, data, origin, info, manifest);
+    }
+
+    private static async Task VerifyPriorityWithoutRangesAsync(string root, byte[] data, Uri origin,
+        MediaResponse info, VerifiedMediaManifest manifest)
+    {
+        var receiverRoot = Path.Combine(root, "peer-no-ranges");
+        var local = new VerifiedMediaPieceCache(receiverRoot);
+        var peer = new VerifiedMediaPieceCache(Path.Combine(root, "peer-no-ranges-neighbor"));
+        var last = manifest.PieceCount - 1;
+        var shared = data.AsMemory(info.ChunkSize, info.ChunkSize);
+        Check(await local.StoreAsync(manifest, 1, shared) &&
+            await peer.StoreAsync(manifest, 1, shared) &&
+            await peer.StoreAsync(manifest, 2, data.AsMemory(2 * info.ChunkSize, info.ChunkSize)) &&
+            await peer.StoreAsync(manifest, last, data.AsMemory(last * info.ChunkSize)),
+            "Receiver and neighbor contain overlapping and distinct verified pieces");
+
+        using var handler = new MediaHandler(data) { IgnoreRange = true };
+        using var http = new HttpClient(handler);
+        var neighbors = new TestPeers(manifest, peer);
+        var receiver = new MediaDownloader(http, receiverRoot, neighbors);
+        var result = await receiver.DownloadToCacheAsync(info, origin);
+        Check((await File.ReadAllBytesAsync(result)).SequenceEqual(data) &&
+            neighbors.Hits == 2 && handler.Requests == 1 && handler.Disposals == 1 &&
+            handler.BodyBytes == last * info.ChunkSize,
+            "Each piece prefers local cache then LAN even when the server provides one continuous HTTP 200 body");
+        Check(await receiver.DownloadToCacheAsync(info, origin) == result &&
+            neighbors.Hits == 2 && handler.Requests == 1,
+            "A completed device cache satisfies the next download");
     }
 
     private static async Task VerifyTlsPeersAsync(string root, byte[] data, Uri origin, MediaResponse info,

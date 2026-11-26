@@ -208,6 +208,7 @@ internal static partial class MediaChecks
         public bool StallBody { get; init; }
         public int Requests;
         public int Disposals;
+        public int BodyBytes;
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -217,7 +218,8 @@ internal static partial class MediaChecks
             var end = (int)(range?.To ?? data.Length - 1);
             var length = end - start + 1;
             if (TruncateFirstResponse && number == 1) length /= 2;
-            var stream = new TestStream(data.AsMemory(start, length), () => Interlocked.Increment(ref Disposals), StallBody);
+            var stream = new TestStream(data.AsMemory(start, length), () => Interlocked.Increment(ref Disposals),
+                bytes => Interlocked.Add(ref BodyBytes, bytes), StallBody);
             var content = new StreamContent(stream);
             if (!UnknownLength) content.Headers.ContentLength = end - start + 1;
             if (range is not null)
@@ -226,7 +228,7 @@ internal static partial class MediaChecks
         }
     }
 
-    private sealed class TestStream(ReadOnlyMemory<byte> data, Action disposed, bool stall) : Stream
+    private sealed class TestStream(ReadOnlyMemory<byte> data, Action disposed, Action<int> read, bool stall) : Stream
     {
         private int _position;
         private bool _disposed;
@@ -242,6 +244,7 @@ internal static partial class MediaChecks
             var count = Math.Min(Math.Min(137, buffer.Length), data.Length - _position);
             data.Slice(_position, count).CopyTo(buffer);
             _position += count;
+            read(count);
             return count;
         }
         protected override void Dispose(bool disposing)

@@ -11,6 +11,17 @@ time, memory and cancellation limits. Unsupported byte ranges fall back to a
 continuous origin response. Existing callers without a configured peer source
 keep the existing no-peer downloader path.
 
+## Source priority — 2026-11-26
+
+A complete device cache satisfies the download first. For an incomplete download,
+each verified piece prefers local cached bytes, then LAN peers, then the origin.
+An HTTP 200 response that ignores byte ranges stays open at its last read offset.
+When a later piece requires origin fallback, the downloader advances that same
+body to the needed offset. A regression fixture checks that a local piece wins
+over a matching peer piece, a neighbor can supply middle and final pieces after
+origin fallback starts, and the final peer piece does not need to be read from
+the origin body.
+
 ## LAN wire format
 
 The platform discovery record advertises `media=1` and the server certificate

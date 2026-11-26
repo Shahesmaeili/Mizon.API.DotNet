@@ -247,6 +247,7 @@ public sealed class MediaDownloader
         var chunkIndex = checked((int)(downloaded / chunkSize));
         var scratch = ArrayPool<byte>.Shared.Rent(manifest?.PieceSize ?? Math.Min(chunkSize, 81920));
         HttpSource? remoteSource = null;
+        long nextRemoteOffset = 0;
         using var lookahead = _peers?.EnableLookahead == true && manifest is { PieceCount: >= 8 }
             ? CancellationTokenSource.CreateLinkedTokenSource(token) : null;
         Task ahead = Task.CompletedTask;
@@ -285,9 +286,9 @@ public sealed class MediaDownloader
                         {
                             var piece = scratch.AsMemory(0, expected);
                             await pending.ConfigureAwait(false);
-                            var fromCache = remoteSource is null && _pieceCache is not null
+                            var fromCache = _pieceCache is not null
                                 && await _pieceCache.TryReadAsync(manifest, chunkIndex, piece, token).ConfigureAwait(false);
-                            var fromPeer = !fromCache && remoteSource is null
+                            var fromPeer = !fromCache
                                 && await TryReadPeerAsync(manifest, chunkIndex, piece, token).ConfigureAwait(false);
                             if (!fromCache && !fromPeer)
                             {
@@ -298,9 +299,17 @@ public sealed class MediaDownloader
                                 }
                                 else
                                 {
-                                    remoteSource ??= await OpenHttpSourceAsync(storageUri, downloaded, expected, fileSize, scratch, readToken).ConfigureAwait(false);
-                                    if (remoteSource.Continuous) lookahead?.Cancel();
+                                    if (remoteSource is null)
+                                    {
+                                        remoteSource = await OpenHttpSourceAsync(storageUri, downloaded, expected, fileSize, scratch, readToken).ConfigureAwait(false);
+                                        nextRemoteOffset = downloaded;
+                                        if (remoteSource.Continuous) lookahead?.Cancel();
+                                    }
+                                    // A continuous HTTP 200 body stays at its last read offset while
+                                    // cached and peer pieces are used. Advance it only on an origin miss.
+                                    await SkipToOffsetAsync(remoteSource.Stream, downloaded - nextRemoteOffset, piece, readToken).ConfigureAwait(false);
                                     await remoteSource.Stream.ReadExactlyAsync(piece, readToken).ConfigureAwait(false);
+                                    nextRemoteOffset = downloaded + expected;
                                 }
                                 if (!manifest.Verify(chunkIndex, piece.Span))
                                     throw new InvalidDataException("The origin media piece does not match its trusted manifest.");
@@ -543,21 +552,23 @@ public sealed class MediaDownloader
             var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             // Servers may ignore Range. Consume one continuous body, skipping the existing prefix once.
             if (continuous)
-            {
-                var remaining = start;
-                while (remaining > 0)
-                {
-                    var read = await stream.ReadAsync(scratch.AsMemory(0, (int)Math.Min(scratch.Length, remaining)), token).ConfigureAwait(false);
-                    if (read == 0) throw new EndOfStreamException("The media response is shorter than the cached prefix.");
-                    remaining -= read;
-                }
-            }
+                await SkipToOffsetAsync(stream, start, scratch, token).ConfigureAwait(false);
             return new HttpSource(response, stream, responseSize, continuous);
         }
         catch
         {
             response.Dispose();
             throw;
+        }
+    }
+
+    private static async ValueTask SkipToOffsetAsync(Stream stream, long remaining, Memory<byte> scratch, CancellationToken token)
+    {
+        while (remaining > 0)
+        {
+            var read = await stream.ReadAsync(scratch[..(int)Math.Min(scratch.Length, remaining)], token).ConfigureAwait(false);
+            if (read == 0) throw new EndOfStreamException("The media response does not reach the requested offset.");
+            remaining -= read;
         }
     }
 
